@@ -6,6 +6,30 @@ const FISH_VOICE_ID = process.env.FISH_VOICE_ID;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 const NVIDIA_ENDPOINT = process.env.NVIDIA_ENDPOINT || 'https://integrate.api.nvidia.com/v1/chat/completions';
 const NVIDIA_MODEL = process.env.NVIDIA_MODEL || 'meta/llama-3.1-8b-instruct';
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+
+async function transcribeAudio(audioBuffer) {
+  try {
+    const formData = new FormData();
+    formData.append('file', new Blob([audioBuffer], { type: 'audio/ogg' }), 'audio.ogg');
+    formData.append('model', 'whisper-large-v3');
+    formData.append('language', 'en');
+
+    const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`
+      },
+      body: formData
+    });
+
+    const data = await response.json();
+    return data.text || '';
+  } catch (error) {
+    console.error('STT Error:', error.message);
+    return '';
+  }
+}
 
 async function generateLLMResponse(userInput) {
   const messages = [
@@ -71,4 +95,4 @@ async function synthesizeSpeech(text) {
   }
 }
 
-module.exports = { generateLLMResponse, synthesizeSpeech };
+module.exports = { generateLLMResponse, synthesizeSpeech, transcribeAudio };

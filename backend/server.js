@@ -3,7 +3,7 @@ const express = require('express');
 const path = require('path');
 const WebSocket = require('ws');
 const http = require('http');
-const { generateLLMResponse, synthesizeSpeech } = require('./ai');
+const { generateLLMResponse, synthesizeSpeech, transcribeAudio } = require('./ai');
 
 const app = express();
 app.use(express.json());
@@ -19,16 +19,36 @@ wss.on('connection', (ws) => {
   console.log('🔌 New WebSocket connection for audio');
 
   const callId = Date.now().toString();
-  activeCalls[callId] = { ws, startTime: Date.now() };
+  activeCalls[callId] = { ws, startTime: Date.now(), audioChunks: [] };
 
   ws.on('message', async (data) => {
     try {
       const message = JSON.parse(data);
 
       if (message.type === 'audio') {
-        console.log(`🎤 Received audio chunk from caller (${data.length} bytes)`);
-        const audioBuffer = Buffer.from(message.data, 'base64');
-        await processCallerAudio(ws, audioBuffer, callId);
+        console.log(`🎤 Received audio chunk (${data.length} bytes)`);
+        activeCalls[callId].audioChunks.push(Buffer.from(message.data, 'base64'));
+
+        if (activeCalls[callId].audioChunks.length >= 5) {
+          const audioBuffer = Buffer.concat(activeCalls[callId].audioChunks);
+          activeCalls[callId].audioChunks = [];
+
+          const text = await transcribeAudio(audioBuffer);
+          if (text) {
+            console.log(`📝 Caller said: ${text}`);
+            const response = await generateLLMResponse(text);
+            console.log(`🤖 AI response: ${response}`);
+
+            const audioData = await synthesizeSpeech(response);
+            if (audioData) {
+              ws.send(JSON.stringify({
+                type: 'audio',
+                data: audioData.toString('base64')
+              }));
+              console.log(`🔊 Sent audio response`);
+            }
+          }
+        }
       }
 
       if (message.type === 'text') {
@@ -42,7 +62,7 @@ wss.on('connection', (ws) => {
             type: 'audio',
             data: audioData.toString('base64')
           }));
-          console.log(`🔊 Sent audio response to caller`);
+          console.log(`🔊 Sent audio response`);
         }
       }
     } catch (err) {
@@ -55,11 +75,6 @@ wss.on('connection', (ws) => {
     delete activeCalls[callId];
   });
 });
-
-async function processCallerAudio(ws, audioBuffer, callId) {
-  console.log(`🎤 Processing ${audioBuffer.length} bytes of audio...`);
-  // STT will be added here (Whisper API or similar)
-}
 
 app.get('/api/status', (req, res) => {
   res.json({
