@@ -1,0 +1,16 @@
+{
+  "name": "steptalk-voice-agent",
+  "version": "1.0.0",
+  "description": "StepTalk - Inbound WhatsApp Voice Agent",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "dotenv": "^16.4.7",
+    "node-fetch": "^3.3.2",
+    "crypto": "^1.0.1"
+  }
+}
