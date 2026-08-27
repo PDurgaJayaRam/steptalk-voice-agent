@@ -241,13 +241,11 @@ function playAudioToCall(callId, wavBuffer) {
       console.log(`Resampled TTS: ${srcRate}Hz -> ${targetRate}Hz`);
     }
 
-    console.log(`Playing: ${playRate}Hz bits=${bitsPerSample} ch=${numChannels} pcm=${playPcm.length} bytes`);
+    const frameSize = 960 * numChannels;
+    const totalSamples = playPcm.length / 2;
+    console.log(`Playing: ${playRate}Hz pcm=${playPcm.length} bytes frames=${Math.ceil(totalSamples/frameSize)}`);
 
     if (callState.silenceInterval) clearInterval(callState.silenceInterval);
-
-    const samplesPerChunk = Math.floor(playRate * 20 / 1000) * numChannels;
-    const bytesPerSample = bitsPerSample / 8;
-    const chunkSize = samplesPerChunk * bytesPerSample;
 
     let offset = 0;
     const playInterval = setInterval(() => {
@@ -265,7 +263,7 @@ function playAudioToCall(callId, wavBuffer) {
         return;
       }
 
-      const end = Math.min(offset + chunkSize, playPcm.length);
+      const end = Math.min(offset + frameSize * 2, playPcm.length);
       const chunk = playPcm.slice(offset, end);
       const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
 
