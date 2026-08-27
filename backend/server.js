@@ -218,30 +218,39 @@ function playAudioToCall(callId, wavBuffer) {
     if (wavBuffer.length <= headerSize) return;
 
     const pcmData = wavBuffer.slice(headerSize);
-    const sampleRate = wavBuffer.readUInt32LE(24) || 48000;
+    const srcRate = wavBuffer.readUInt32LE(24) || 44100;
     const bitsPerSample = wavBuffer.readUInt16LE(34) || 16;
     const numChannels = wavBuffer.readUInt16LE(22) || 1;
+    const targetRate = 48000;
 
-    console.log(`Playing: sampleRate=${sampleRate} bits=${bitsPerSample} ch=${numChannels} pcm=${pcmData.length} bytes`);
+    let playPcm = pcmData;
+    let playRate = srcRate;
+    if (srcRate !== targetRate) {
+      playPcm = upsampleBuffer(pcmData, srcRate, targetRate);
+      playRate = targetRate;
+      console.log(`Resampled TTS: ${srcRate}Hz -> ${targetRate}Hz`);
+    }
 
-    const samplesPerChunk = Math.floor(sampleRate / 100) * numChannels;
+    console.log(`Playing: ${playRate}Hz bits=${bitsPerSample} ch=${numChannels} pcm=${playPcm.length} bytes`);
+
+    const samplesPerChunk = Math.floor(playRate / 100) * numChannels;
     const bytesPerSample = bitsPerSample / 8;
     const chunkSize = samplesPerChunk * bytesPerSample;
 
     let offset = 0;
     const playInterval = setInterval(() => {
-      if (offset >= pcmData.length || !activeCalls.has(callId)) {
+      if (offset >= playPcm.length || !activeCalls.has(callId)) {
         clearInterval(playInterval);
         console.log('Playback finished');
         return;
       }
 
-      const end = Math.min(offset + chunkSize, pcmData.length);
-      const chunk = pcmData.slice(offset, end);
+      const end = Math.min(offset + chunkSize, playPcm.length);
+      const chunk = playPcm.slice(offset, end);
       const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
 
       try {
-        callState.source.onData({ samples, sampleRate, bitsPerSample, channelCount: numChannels });
+        callState.source.onData({ samples, sampleRate: playRate, bitsPerSample, channelCount: numChannels });
       } catch (e) {}
 
       offset = end;
@@ -252,6 +261,24 @@ function playAudioToCall(callId, wavBuffer) {
   } catch (err) {
     console.error('Playback error:', err.message);
   }
+}
+
+function upsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+  const ratio = outputSampleRate / inputSampleRate;
+  const newLength = Math.round(buffer.length / 2 * ratio);
+  const result = Buffer.alloc(newLength * 2);
+  const inputView = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 2);
+  const outputView = new Int16Array(result.buffer, result.byteOffset, newLength);
+
+  for (let i = 0; i < newLength; i++) {
+    const srcPos = i / ratio;
+    const idx = Math.floor(srcPos);
+    const frac = srcPos - idx;
+    const a = inputView[idx] || 0;
+    const b = inputView[idx + 1] || 0;
+    outputView[i] = Math.round(a + (b - a) * frac);
+  }
+  return result;
 }
 
 function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
