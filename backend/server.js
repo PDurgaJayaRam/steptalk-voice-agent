@@ -82,19 +82,6 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     };
     activeCalls.set(callId, callState);
 
-    const audioSource = new RTCAudioSource();
-    const silenceTrack = audioSource.createTrack();
-    const silenceStream = new MediaStream([silenceTrack]);
-    pc.addTrack(silenceTrack, silenceStream);
-    callState.source = audioSource;
-
-    const sampleRate = 48000;
-    const samplesPer10ms = sampleRate / 100;
-    const silenceData = { samples: new Int16Array(samplesPer10ms), sampleRate };
-    callState.silenceInterval = setInterval(() => {
-      try { audioSource.onData(silenceData); } catch (e) {}
-    }, 10);
-
     let audioTrackAdded = false;
 
     pc.ontrack = (event) => {
@@ -141,6 +128,18 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     console.log('Setting remote description...');
     await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: session.sdp }));
+
+    const audioSource = new RTCAudioSource();
+    const silenceTrack = audioSource.createTrack();
+    pc.addTransceiver(silenceTrack, { direction: 'sendrecv' });
+    callState.source = audioSource;
+
+    const sampleRate = 48000;
+    const samplesPer10ms = sampleRate / 100;
+    const silenceData = { samples: new Int16Array(samplesPer10ms), sampleRate };
+    callState.silenceInterval = setInterval(() => {
+      try { audioSource.onData(silenceData); } catch (e) {}
+    }, 10);
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
