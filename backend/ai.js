@@ -50,7 +50,7 @@ async function generateLLMResponse(userInput) {
         'Authorization': `Bearer ${GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'llama-3.1-8b-instant',
+        model: 'openai/gpt-oss-20b',
         messages,
         stream: false,
         max_tokens: 200
