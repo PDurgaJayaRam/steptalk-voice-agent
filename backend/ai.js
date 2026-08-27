@@ -79,7 +79,7 @@ async function synthesizeSpeech(text) {
       body: JSON.stringify({
         text,
         reference_id: FISH_VOICE_ID,
-        format: 'opus'
+        format: 'wav'
       })
     });
 

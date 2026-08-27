@@ -88,7 +88,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     pc.addTrack(silenceTrack, silenceStream);
     callState.source = audioSource;
 
-    const sampleRate = 16000;
+    const sampleRate = 48000;
     const samplesPer10ms = sampleRate / 100;
     const silenceData = { samples: new Int16Array(samplesPer10ms), sampleRate };
     callState.silenceInterval = setInterval(() => {
@@ -107,21 +107,25 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
       callState.sink = sink;
 
       let lastTranscript = Date.now();
+      let incomingSampleRate = data.sampleRate || 48000;
 
       sink.ondata = (data) => {
+        incomingSampleRate = data.sampleRate || 48000;
         if (Date.now() - lastTranscript < 3000) return;
 
         const samples = data.samples;
-        const pcmBuffer = Buffer.from(samples.buffer);
+        if (!samples || samples.length === 0) return;
 
+        const pcmBuffer = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
         callState.audioBuffer = Buffer.concat([callState.audioBuffer, pcmBuffer]);
 
-        const bufferDurationMs = (callState.audioBuffer.length / (sampleRate * 2)) * 1000;
+        const bytesPerSample = 2;
+        const bufferDurationMs = (callState.audioBuffer.length / (incomingSampleRate * bytesPerSample)) * 1000;
         if (bufferDurationMs >= 3000) {
           lastTranscript = Date.now();
           const audioToProcess = callState.audioBuffer;
           callState.audioBuffer = Buffer.alloc(0);
-          processAudioForAI(callId, audioToProcess, sampleRate);
+          processAudioForAI(callId, audioToProcess, incomingSampleRate);
         }
       };
     };
@@ -162,10 +166,19 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
   if (!callState) return;
 
   try {
+    const sum = pcmBuffer.reduce((acc, val) => acc + Math.abs(val), 0);
+    const avg = sum / pcmBuffer.length;
+    console.log(`Audio: ${pcmBuffer.length} bytes, ${sampleRate}Hz, avg amplitude=${avg.toFixed(1)}`);
+
+    if (avg < 50) {
+      console.log('Audio too quiet, skipping');
+      return;
+    }
+
     const wavBuffer = pcmToWav(pcmBuffer, sampleRate, 1, 16);
     const audioBlob = new Blob([wavBuffer], { type: 'audio/wav' });
 
-    console.log('Transcribing...');
+    console.log(`Transcribing ${wavBuffer.length} byte WAV...`);
     const text = await transcribeAudio(audioBlob);
     if (!text || text.trim().length === 0) {
       console.log('No speech detected');
@@ -180,7 +193,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     const ttsBuffer = await synthesizeSpeech(response);
     if (!ttsBuffer) { console.log('TTS failed'); return; }
 
-    console.log(`TTS: ${ttsBuffer.length} bytes, sending to caller...`);
+    console.log(`TTS: ${ttsBuffer.length} bytes, playing to caller...`);
     playAudioToCall(callId, ttsBuffer);
 
   } catch (err) {
@@ -188,10 +201,49 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
   }
 }
 
-function playAudioToCall(callId, opusBuffer) {
+function playAudioToCall(callId, wavBuffer) {
   const callState = activeCalls.get(callId);
   if (!callState?.source) return;
-  console.log(`Playing ${opusBuffer.length} bytes of audio to caller`);
+
+  try {
+    const headerSize = 44;
+    if (wavBuffer.length <= headerSize) return;
+
+    const pcmData = wavBuffer.slice(headerSize);
+    const sampleRate = wavBuffer.readUInt32LE(24) || 48000;
+    const bitsPerSample = wavBuffer.readUInt16LE(34) || 16;
+    const numChannels = wavBuffer.readUInt16LE(22) || 1;
+
+    console.log(`Playing: sampleRate=${sampleRate} bits=${bitsPerSample} ch=${numChannels} pcm=${pcmData.length} bytes`);
+
+    const samplesPerChunk = Math.floor(sampleRate / 100) * numChannels;
+    const bytesPerSample = bitsPerSample / 8;
+    const chunkSize = samplesPerChunk * bytesPerSample;
+
+    let offset = 0;
+    const playInterval = setInterval(() => {
+      if (offset >= pcmData.length || !activeCalls.has(callId)) {
+        clearInterval(playInterval);
+        console.log('Playback finished');
+        return;
+      }
+
+      const end = Math.min(offset + chunkSize, pcmData.length);
+      const chunk = pcmData.slice(offset, end);
+      const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
+
+      try {
+        callState.source.onData({ samples, sampleRate, bitsPerSample, channelCount: numChannels });
+      } catch (e) {}
+
+      offset = end;
+    }, 10);
+
+    callState.playInterval = playInterval;
+
+  } catch (err) {
+    console.error('Playback error:', err.message);
+  }
 }
 
 function pcmToWav(pcmData, sampleRate, numChannels, bitsPerSample) {
@@ -241,6 +293,7 @@ function cleanupCall(callId) {
   if (callState) {
     try {
       if (callState.silenceInterval) clearInterval(callState.silenceInterval);
+      if (callState.playInterval) clearInterval(callState.playInterval);
       callState.sink?.stop();
       callState.source?.close();
       callState.pc?.close();
