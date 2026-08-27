@@ -24,6 +24,10 @@ async function transcribeAudio(audioBuffer) {
     });
 
     const data = await response.json();
+    if (data.error) {
+      console.error('Groq error:', JSON.stringify(data.error));
+      return '';
+    }
     return data.text || '';
   } catch (error) {
     console.error('STT Error:', error.message);

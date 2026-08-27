@@ -166,8 +166,9 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
   if (!callState) return;
 
   try {
-    const sum = pcmBuffer.reduce((acc, val) => acc + Math.abs(val), 0);
-    const avg = sum / pcmBuffer.length;
+    const samples = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength / 2);
+    const sum = samples.reduce((acc, val) => acc + Math.abs(val), 0);
+    const avg = sum / samples.length;
     console.log(`Audio: ${pcmBuffer.length} bytes, ${sampleRate}Hz, avg amplitude=${avg.toFixed(1)}`);
 
     if (avg < 50) {
@@ -175,7 +176,15 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       return;
     }
 
-    const wavBuffer = pcmToWav(pcmBuffer, sampleRate, 1, 16);
+    let audioToTranscribe = pcmBuffer;
+    let audioSampleRate = sampleRate;
+    if (sampleRate !== 16000) {
+      audioToTranscribe = downsampleBuffer(pcmBuffer, sampleRate, 16000);
+      audioSampleRate = 16000;
+      console.log(`Downsampled: ${pcmBuffer.length} -> ${audioToTranscribe.length} bytes (48k->16k)`);
+    }
+
+    const wavBuffer = pcmToWav(audioToTranscribe, audioSampleRate, 1, 16);
     const audioBlob = new Blob([wavBuffer], { type: 'audio/wav' });
 
     console.log(`Transcribing ${wavBuffer.length} byte WAV...`);
@@ -244,6 +253,20 @@ function playAudioToCall(callId, wavBuffer) {
   } catch (err) {
     console.error('Playback error:', err.message);
   }
+}
+
+function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+  const ratio = inputSampleRate / outputSampleRate;
+  const newLength = Math.round(buffer.length / ratio);
+  const result = Buffer.alloc(newLength * 2);
+  const inputView = new Int16Array(buffer.buffer, buffer.byteOffset, buffer.byteLength / 2);
+  const outputView = new Int16Array(result.buffer, result.byteOffset, newLength);
+
+  for (let i = 0; i < newLength; i++) {
+    const pos = Math.round(i * ratio);
+    outputView[i] = inputView[pos] || 0;
+  }
+  return result;
 }
 
 function pcmToWav(pcmData, sampleRate, numChannels, bitsPerSample) {
