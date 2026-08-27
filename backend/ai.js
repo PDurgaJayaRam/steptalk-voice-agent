@@ -11,7 +11,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 async function transcribeAudio(audioBuffer) {
   try {
     const formData = new FormData();
-    formData.append('file', new Blob([audioBuffer], { type: 'audio/ogg' }), 'audio.ogg');
+    formData.append('file', new Blob([audioBuffer], { type: 'audio/wav' }), 'audio.wav');
     formData.append('model', 'whisper-large-v3');
     formData.append('language', 'en');
 
