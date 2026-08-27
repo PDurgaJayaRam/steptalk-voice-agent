@@ -113,8 +113,7 @@ async function launchBridge() {
   bridgePage.on('console', msg => console.log('BRIDGE:', msg.text()));
   bridgePage.on('pageerror', err => console.error('BRIDGE ERROR:', err.message));
 
-  const html = require('fs').readFileSync(path.join(__dirname, 'bridge.html'), 'utf8');
-  await bridgePage.setContent(html, { waitUntil: 'networkidle0' });
+  await bridgePage.goto(`http://127.0.0.1:${PORT}/bridge`, { waitUntil: 'networkidle0', timeout: 15000 });
   console.log('Bridge page loaded');
 
   await new Promise((resolve) => {
@@ -399,6 +398,10 @@ app.get('/api/status', (req, res) => {
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+app.get('/bridge', (req, res) => {
+  res.sendFile(path.join(__dirname, 'bridge.html'));
 });
 
 server.listen(PORT, async () => {
