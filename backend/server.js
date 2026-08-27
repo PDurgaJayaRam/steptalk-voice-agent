@@ -133,17 +133,8 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     const audioSource = new RTCAudioSource();
     const silenceTrack = audioSource.createTrack();
-
-    const transceivers = pc.getTransceivers();
-    const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
-    if (audioTransceiver) {
-      console.log('Found audio transceiver, replacing sender track...');
-      await audioTransceiver.sender.replaceTrack(silenceTrack);
-      audioTransceiver.direction = 'sendrecv';
-    } else {
-      console.log('No audio transceiver found, adding new...');
-      pc.addTransceiver(silenceTrack, { direction: 'sendrecv' });
-    }
+    const silenceStream = new MediaStream([silenceTrack]);
+    pc.addTrack(silenceTrack, silenceStream);
     callState.source = audioSource;
 
     const sampleRate = 48000;
@@ -156,13 +147,14 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    console.log(`Answer: ${answer.sdp.length} bytes`);
+    const finalSdp = answer.sdp.replace(/a=setup:actpass/g, 'a=setup:active');
+    console.log(`Answer: ${finalSdp.length} bytes`);
 
-    const preOk = await sendAction(callId, 'pre_accept', answer.sdp);
+    const preOk = await sendAction(callId, 'pre_accept', finalSdp);
     if (!preOk) { cleanupCall(callId); return; }
 
     setTimeout(async () => {
-      const acceptOk = await sendAction(callId, 'accept', answer.sdp);
+      const acceptOk = await sendAction(callId, 'accept', finalSdp);
       console.log(acceptOk ? 'Call active! Speak now...' : 'Accept failed');
       if (!acceptOk) cleanupCall(callId);
     }, 2000);
