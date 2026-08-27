@@ -3,6 +3,7 @@ const express = require('express');
 const path = require('path');
 const http = require('http');
 const axios = require('axios');
+const { RTCPeerConnection, RTCSessionDescription } = require('@roamhq/wrtc');
 const { generateLLMResponse, synthesizeSpeech, transcribeAudio } = require('./ai');
 
 const app = express();
@@ -43,7 +44,6 @@ app.post('/webhook', async (req, res) => {
     const contact = change?.value?.contacts?.[0];
 
     if (!call || !call.id || !call.event) {
-      console.log('Non-call event, ignoring');
       return res.sendStatus(200);
     }
 
@@ -56,21 +56,14 @@ app.post('/webhook', async (req, res) => {
       const session = call.session;
 
       console.log(`Incoming call from ${callerName} (${callerNumber})`);
-      console.log(`SDP Offer (${session?.sdp?.length || 0} bytes):`);
-      console.log(session?.sdp);
+      console.log(`SDP Offer (${session?.sdp?.length || 0} bytes)`);
 
-      activeCalls.set(callId, {
-        callId, callerName, callerNumber,
-        startTime: Date.now(), audioChunks: []
-      });
-
-      await answerCall(callId, session);
+      await handleIncomingCall(callId, session, callerName, callerNumber);
 
     } else if (call.event === 'terminate') {
-      console.log(`Call terminated: ${callId} | Duration: ${call.duration || '?'}s | Status: ${call.status || '?'}`);
+      console.log(`Call terminated: ${callId} | Duration: ${call.duration || '?'}s`);
       if (call.errors) console.log(`Errors:`, JSON.stringify(call.errors));
-      activeCalls.delete(callId);
-
+      cleanupCall(callId);
     } else {
       console.log(`Unhandled event: ${call.event}`);
     }
@@ -82,63 +75,159 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-async function answerCall(callId, session) {
+async function handleIncomingCall(callId, session, callerName, callerNumber) {
   if (!session?.sdp) {
     console.error('No SDP in offer');
     return;
   }
 
-  const sdp = session.sdp;
+  try {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
 
-  const hasFingerprint = sdp.includes('a=fingerprint:');
-  const hasDtlsSetup = sdp.includes('a=setup:');
-  const hasIceUfrag = sdp.includes('a=ice-ufrag:');
-  const hasMsid = sdp.includes('a=msid:');
-  const hasSsrc = sdp.includes('a=ssrc:');
+    const callState = {
+      pc, callId, callerName, callerNumber,
+      startTime: Date.now(), audioChunks: []
+    };
+    activeCalls.set(callId, callState);
 
-  console.log(`SDP analysis: fingerprint=${hasFingerprint} dtls=${hasDtlsSetup} ice=${hasIceUfrag} msid=${hasMsid} ssrc=${hasSsrc}`);
+    pc.ontrack = (event) => {
+      console.log('Audio track received from WhatsApp');
+      const stream = event.streams[0];
+      if (stream) handleAudioStream(callId, stream);
+    };
 
-  const preOk = await sendAction(callId, 'pre_accept', sdp);
-  if (!preOk) {
-    console.error('Pre-accept failed');
-    return;
-  }
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        console.log('ICE candidate:', event.candidate.candidate?.substring(0, 80));
+      }
+    };
 
-  setTimeout(async () => {
-    const acceptOk = await sendAction(callId, 'accept', sdp);
-    if (acceptOk) {
-      console.log('Call accepted! Audio should be flowing.');
-    } else {
-      console.error('Accept failed');
+    pc.onconnectionstatechange = () => {
+      console.log(`Connection state: ${pc.connectionState}`);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        cleanupCall(callId);
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      console.log(`ICE connection state: ${pc.iceConnectionState}`);
+    };
+
+    console.log('Setting remote description...');
+    await pc.setRemoteDescription(new RTCSessionDescription({
+      type: 'offer',
+      sdp: session.sdp
+    }));
+    console.log('Remote description set OK');
+
+    console.log('Creating answer...');
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    console.log(`Answer created (${answer.sdp.length} bytes)`);
+
+    const preOk = await sendAction(callId, 'pre_accept', answer.sdp);
+    if (!preOk) {
+      console.error('Pre-accept failed');
+      cleanupCall(callId);
+      return;
     }
-  }, 2000);
+
+    setTimeout(async () => {
+      const acceptOk = await sendAction(callId, 'accept', answer.sdp);
+      if (acceptOk) {
+        console.log('Call accepted! Waiting for audio...');
+      } else {
+        console.error('Accept failed');
+        cleanupCall(callId);
+      }
+    }, 2000);
+
+  } catch (err) {
+    console.error('Error handling call:', err.message);
+    cleanupCall(callId);
+  }
+}
+
+function handleAudioStream(callId, stream) {
+  const callState = activeCalls.get(callId);
+  if (!callState) return;
+
+  const audioTracks = stream.getAudioTracks();
+  console.log(`Received ${audioTracks.length} audio track(s)`);
+
+  audioTracks.forEach(track => {
+    const processAudio = async () => {
+      try {
+        const reader = track.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            callState.audioChunks.push(value);
+            if (callState.audioChunks.length >= 40) {
+              await processAudioForAI(callId);
+            }
+          }
+        }
+      } catch (err) {
+        console.log('Audio track ended');
+      }
+    };
+    processAudio();
+  });
+}
+
+async function processAudioForAI(callId) {
+  const callState = activeCalls.get(callId);
+  if (!callState || callState.audioChunks.length === 0) return;
+
+  try {
+    const audioData = Buffer.concat(callState.audioChunks);
+    callState.audioChunks = [];
+    const audioBlob = new Blob([audioData], { type: 'audio/webm' });
+
+    console.log('Transcribing...');
+    const text = await transcribeAudio(audioBlob);
+    if (!text || text.trim().length === 0) return;
+
+    console.log(`Caller said: "${text}"`);
+    const response = await generateLLMResponse(text);
+    console.log(`AI: "${response}"`);
+
+    const audioBuffer = await synthesizeSpeech(response);
+    if (audioBuffer) {
+      console.log(`TTS: ${audioBuffer.length} bytes`);
+    }
+  } catch (err) {
+    console.error('AI error:', err.message);
+  }
 }
 
 async function sendAction(callId, action, sdp = null) {
-  const body = {
-    messaging_product: 'whatsapp',
-    call_id: callId,
-    action: action
-  };
-
-  if (sdp) {
-    body.session = {
-      sdp_type: 'answer',
-      sdp: sdp
-    };
-  }
+  const body = { messaging_product: 'whatsapp', call_id: callId, action };
+  if (sdp) body.session = { sdp_type: 'answer', sdp };
 
   try {
     const response = await axios.post(WHATSAPP_API_URL, body, {
       headers: { Authorization: ACCESS_TOKEN, 'Content-Type': 'application/json' }
     });
-    const success = response.data?.success === true;
-    console.log(`${action}: ${success ? 'OK' : 'FAIL'} - ${JSON.stringify(response.data)}`);
-    return success;
+    const ok = response.data?.success === true;
+    console.log(`${action}: ${ok ? 'OK' : JSON.stringify(response.data)}`);
+    return ok;
   } catch (error) {
-    const msg = error.response?.data?.error?.message || error.message;
-    console.error(`${action} error:`, msg);
+    console.error(`${action} error:`, error.response?.data?.error?.message || error.message);
     return false;
+  }
+}
+
+function cleanupCall(callId) {
+  const callState = activeCalls.get(callId);
+  if (callState) {
+    try { callState.pc?.close(); } catch (e) {}
+    activeCalls.delete(callId);
+    console.log(`Cleaned up call ${callId}`);
   }
 }
 
