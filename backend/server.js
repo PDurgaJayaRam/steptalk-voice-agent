@@ -72,7 +72,9 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
   try {
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      bundlePolicy: 'max-bundle',
+      iceTransportPolicy: 'all'
     });
 
     const callState = {
@@ -145,11 +147,12 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     callState.source = audioSource;
 
     const sampleRate = 48000;
-    const samplesPer10ms = sampleRate / 100;
-    const silenceData = { samples: new Int16Array(samplesPer10ms), sampleRate };
+    const ptime = 20;
+    const samplesPerFrame = sampleRate * ptime / 1000;
+    const silenceData = { samples: new Int16Array(samplesPerFrame), sampleRate, bitsPerSample: 16, channelCount: 1 };
     callState.silenceInterval = setInterval(() => {
       try { audioSource.onData(silenceData); } catch (e) {}
-    }, 10);
+    }, ptime);
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -244,7 +247,7 @@ function playAudioToCall(callId, wavBuffer) {
 
     if (callState.silenceInterval) clearInterval(callState.silenceInterval);
 
-    const samplesPerChunk = Math.floor(playRate / 100) * numChannels;
+    const samplesPerChunk = Math.floor(playRate * 20 / 1000) * numChannels;
     const bytesPerSample = bitsPerSample / 8;
     const chunkSize = samplesPerChunk * bytesPerSample;
 
@@ -255,10 +258,11 @@ function playAudioToCall(callId, wavBuffer) {
         console.log('Playback finished');
         if (activeCalls.has(callId) && callState.source) {
           const sr = 48000;
-          const silenceData = { samples: new Int16Array(sr / 100), sampleRate: sr };
+          const pf = sr * 20 / 1000;
+          const silenceData = { samples: new Int16Array(pf), sampleRate: sr, bitsPerSample: 16, channelCount: 1 };
           callState.silenceInterval = setInterval(() => {
             try { callState.source.onData(silenceData); } catch (e) {}
-          }, 10);
+          }, 20);
         }
         return;
       }
@@ -269,10 +273,10 @@ function playAudioToCall(callId, wavBuffer) {
 
       try {
         callState.source.onData({ samples, sampleRate: playRate, bitsPerSample, channelCount: numChannels });
-      } catch (e) {}
+      } catch (e) { console.error('onData error:', e.message); }
 
       offset = end;
-    }, 10);
+    }, 20);
 
     callState.playInterval = playInterval;
 
