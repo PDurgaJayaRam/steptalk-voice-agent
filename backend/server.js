@@ -131,7 +131,17 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     const audioSource = new RTCAudioSource();
     const silenceTrack = audioSource.createTrack();
-    pc.addTransceiver(silenceTrack, { direction: 'sendrecv' });
+
+    const transceivers = pc.getTransceivers();
+    const audioTransceiver = transceivers.find(t => t.receiver.track.kind === 'audio');
+    if (audioTransceiver) {
+      console.log('Found audio transceiver, replacing sender track...');
+      await audioTransceiver.sender.replaceTrack(silenceTrack);
+      audioTransceiver.direction = 'sendrecv';
+    } else {
+      console.log('No audio transceiver found, adding new...');
+      pc.addTransceiver(silenceTrack, { direction: 'sendrecv' });
+    }
     callState.source = audioSource;
 
     const sampleRate = 48000;
