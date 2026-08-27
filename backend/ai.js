@@ -4,6 +4,7 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
 async function transcribeAudio(wavBuffer) {
   try {
@@ -37,38 +38,48 @@ async function generateLLMResponse(userInput) {
   const messages = [
     {
       role: 'system',
-      content: 'You are StepTalk AI, a professional sales assistant. Keep responses concise, friendly, and under 2-3 sentences. You help customers with product inquiries and guide them through purchases.'
+      content: 'You are StepTalk AI, a professional sales assistant. Respond DIRECTLY to the customer in 1-2 short sentences. Never show your thinking process. Never use bullet points or numbered lists. Just speak naturally like a friendly human assistant would on a phone call.'
     },
     { role: 'user', content: userInput }
   ];
 
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${GROQ_API_KEY}`
+        'Authorization': `Bearer ${NVIDIA_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'openai/gpt-oss-20b',
+        model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
         messages,
         stream: false,
-        max_tokens: 200
+        max_tokens: 800
       })
     });
 
     const data = await response.json();
 
     if (data.error) {
-      console.error('Groq LLM error:', JSON.stringify(data.error));
+      console.error('NVIDIA LLM error:', JSON.stringify(data.error));
       throw new Error(data.error.message);
     }
 
     if (data.choices && data.choices.length > 0) {
-      return data.choices[0].message.content;
+      let content = data.choices[0].message.content || '';
+      const match = content.match(/"([^"]+)"\s*$/);
+      if (match) return match[1].trim();
+      const lines = content.split('\n').filter(l => l.trim());
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].replace(/^["']|["']$/g, '').trim();
+        if (line.length > 10 && !line.includes('**') && !line.includes('Step ') && !line.match(/^\d/)) {
+          return line;
+        }
+      }
+      return content.slice(-200).trim();
     }
 
-    throw new Error('No response from Groq LLM');
+    throw new Error('No response from NVIDIA NIM');
   } catch (error) {
     console.error('LLM Error:', error.message);
     return "I'm sorry, I didn't catch that. Could you please repeat?";
