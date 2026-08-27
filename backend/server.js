@@ -3,8 +3,8 @@ const express = require('express');
 const path = require('path');
 const http = require('http');
 const axios = require('axios');
-const { RTCPeerConnection, RTCSessionDescription, MediaStream } = require('@roamhq/wrtc');
-const { RTCAudioSource, RTCAudioSink } = require('@roamhq/wrtc').nonstandard;
+const WebSocket = require('ws');
+const puppeteer = require('puppeteer');
 const { generateLLMResponse, synthesizeSpeech, transcribeAudio } = require('./ai');
 
 const app = express();
@@ -19,6 +19,111 @@ const ACCESS_TOKEN = `Bearer ${process.env.META_ACCESS_TOKEN}`;
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN;
 
 const activeCalls = new Map();
+
+const wss = new WebSocket.Server({ server, path: '/bridge' });
+let bridgeWs = null;
+let browser = null;
+let bridgePage = null;
+let pendingAnswer = null;
+let pendingAnswerResolve = null;
+
+wss.on('connection', (ws) => {
+  console.log('Bridge connected');
+  bridgeWs = ws;
+
+  ws.on('message', async (data) => {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'ready') {
+        console.log('Bridge page ready');
+      } else if (msg.type === 'answer') {
+        console.log(`Bridge answer: ${msg.sdp.length} bytes`);
+        pendingAnswer = msg.sdp;
+        if (pendingAnswerResolve) {
+          pendingAnswerResolve(msg.sdp);
+          pendingAnswerResolve = null;
+        }
+      } else if (msg.type === 'captured') {
+        handleCapturedAudio(msg);
+      } else if (msg.type === 'ice') {
+        console.log(`Bridge ICE: ${msg.state}`);
+      } else if (msg.type === 'connection') {
+        console.log(`Bridge connection: ${msg.state}`);
+      } else if (msg.type === 'playback_done') {
+        console.log('Bridge playback done');
+      } else if (msg.type === 'error') {
+        console.error('Bridge error:', msg.error);
+      }
+    } catch (e) {
+      console.error('Bridge message error:', e.message);
+    }
+  });
+
+  ws.on('close', () => {
+    console.log('Bridge disconnected');
+    if (bridgeWs === ws) bridgeWs = null;
+  });
+});
+
+async function handleCapturedAudio(msg) {
+  const callState = activeCalls.get(msg.callId);
+  if (!callState) return;
+
+  try {
+    const pcmBase64 = msg.pcm;
+    const binary = Buffer.from(pcmBase64, 'base64');
+    const samples = new Int16Array(binary.buffer, binary.byteOffset, binary.byteLength / 2);
+    const sum = samples.reduce((acc, val) => acc + Math.abs(val), 0);
+    const avg = sum / samples.length;
+
+    if (avg < 50) return;
+
+    callState.audioBuffer = Buffer.concat([callState.audioBuffer, binary]);
+
+    const sampleRate = msg.sampleRate || 48000;
+    const bytesPerSample = 2;
+    const bufferDurationMs = (callState.audioBuffer.length / (sampleRate * bytesPerSample)) * 1000;
+
+    if (bufferDurationMs >= 3000) {
+      const audioToProcess = callState.audioBuffer;
+      callState.audioBuffer = Buffer.alloc(0);
+      processAudioForAI(msg.callId, audioToProcess, sampleRate);
+    }
+  } catch (e) {
+    console.error('Captured audio error:', e.message);
+  }
+}
+
+async function launchBridge() {
+  if (browser && bridgePage) return;
+
+  console.log('Launching Puppeteer...');
+  browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process'
+    ]
+  });
+
+  bridgePage = await browser.newPage();
+  bridgePage.on('console', msg => console.log('BRIDGE:', msg.text()));
+  bridgePage.on('pageerror', err => console.error('BRIDGE ERROR:', err.message));
+
+  const html = require('fs').readFileSync(path.join(__dirname, 'bridge.html'), 'utf8');
+  await bridgePage.setContent(html, { waitUntil: 'networkidle0' });
+  console.log('Bridge page loaded');
+
+  await new Promise((resolve) => {
+    const check = setInterval(() => {
+      if (bridgeWs) { clearInterval(check); resolve(); }
+    }, 100);
+    setTimeout(() => { clearInterval(check); resolve(); }, 10000);
+  });
+}
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -71,86 +176,36 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
   if (!session?.sdp) return;
 
   try {
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-      bundlePolicy: 'max-bundle',
-      iceTransportPolicy: 'all'
-    });
+    await launchBridge();
 
     const callState = {
-      pc, callId, callerName, callerNumber,
-      startTime: Date.now(), audioChunks: [],
-      audioBuffer: Buffer.alloc(0), sink: null, source: null
+      callId, callerName, callerNumber,
+      startTime: Date.now(),
+      audioBuffer: Buffer.alloc(0)
     };
     activeCalls.set(callId, callState);
 
-    const audioSource = new RTCAudioSource();
-    const silenceTrack = audioSource.createTrack();
-    const silenceStream = new MediaStream([silenceTrack]);
-    pc.addTrack(silenceTrack, silenceStream);
-    callState.source = audioSource;
+    console.log('Sending offer to bridge...');
+    pendingAnswer = null;
+    pendingAnswerResolve = null;
 
-    const sampleRate = 48000;
-    const ptime = 20;
-    const samplesPerFrame = sampleRate * ptime / 1000;
-    const silenceData = { samples: new Int16Array(samplesPerFrame), sampleRate, bitsPerSample: 16, channelCount: 1 };
-    callState.silenceInterval = setInterval(() => {
-      try { audioSource.onData(silenceData); } catch (e) {}
-    }, ptime);
+    const answerPromise = new Promise((resolve) => {
+      pendingAnswerResolve = resolve;
+    });
 
-    let audioTrackAdded = false;
+    bridgeWs.send(JSON.stringify({
+      type: 'offer',
+      sdp: session.sdp,
+      callId
+    }));
 
-    pc.ontrack = (event) => {
-      if (audioTrackAdded) return;
-      audioTrackAdded = true;
-      console.log('Audio track from WhatsApp');
+    const answerSdp = await Promise.race([
+      answerPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Bridge timeout')), 10000))
+    ]);
 
-      const remoteTrack = event.track;
-      const sink = new RTCAudioSink(remoteTrack);
-      callState.sink = sink;
-
-      let lastTranscript = Date.now();
-      let incomingSampleRate = 48000;
-
-      sink.ondata = (data) => {
-        incomingSampleRate = data.sampleRate || 48000;
-        if (Date.now() - lastTranscript < 3000) return;
-
-        const samples = data.samples;
-        if (!samples || samples.length === 0) return;
-
-        const pcmBuffer = Buffer.from(samples.buffer, samples.byteOffset, samples.byteLength);
-        callState.audioBuffer = Buffer.concat([callState.audioBuffer, pcmBuffer]);
-
-        const bytesPerSample = 2;
-        const bufferDurationMs = (callState.audioBuffer.length / (incomingSampleRate * bytesPerSample)) * 1000;
-        if (bufferDurationMs >= 3000) {
-          lastTranscript = Date.now();
-          const audioToProcess = callState.audioBuffer;
-          callState.audioBuffer = Buffer.alloc(0);
-          processAudioForAI(callId, audioToProcess, incomingSampleRate);
-        }
-      };
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log(`State: ${pc.connectionState}`);
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') cleanupCall(callId);
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      console.log(`ICE: ${pc.iceConnectionState}`);
-    };
-
-    console.log('Setting remote description...');
-    await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: session.sdp }));
-
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    let finalSdp = answer.sdp.replace(/a=setup:actpass/g, 'a=setup:active');
-    
+    let finalSdp = answerSdp.replace(/a=setup:actpass/g, 'a=setup:active');
     if (finalSdp.includes('a=inactive')) {
-      console.log('WARNING: SDP has inactive, forcing sendrecv');
       finalSdp = finalSdp.replace(/a=inactive/g, 'a=sendrecv');
     }
     console.log(`Answer: ${finalSdp.length} bytes`);
@@ -221,7 +276,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
 
 function playAudioToCall(callId, wavBuffer) {
   const callState = activeCalls.get(callId);
-  if (!callState?.source) return;
+  if (!callState || !bridgeWs || bridgeWs.readyState !== WebSocket.OPEN) return;
 
   try {
     const headerSize = 44;
@@ -229,52 +284,24 @@ function playAudioToCall(callId, wavBuffer) {
 
     const pcmData = wavBuffer.slice(headerSize);
     const srcRate = wavBuffer.readUInt32LE(24) || 44100;
-    const bitsPerSample = wavBuffer.readUInt16LE(34) || 16;
     const numChannels = wavBuffer.readUInt16LE(22) || 1;
     const targetRate = 48000;
 
     let playPcm = pcmData;
-    let playRate = srcRate;
     if (srcRate !== targetRate) {
       playPcm = upsampleBuffer(pcmData, srcRate, targetRate);
-      playRate = targetRate;
       console.log(`Resampled TTS: ${srcRate}Hz -> ${targetRate}Hz`);
     }
 
-    const frameSize = 960 * numChannels;
-    const totalSamples = playPcm.length / 2;
-    console.log(`Playing: ${playRate}Hz pcm=${playPcm.length} bytes frames=${Math.ceil(totalSamples/frameSize)}`);
-
-    if (callState.silenceInterval) clearInterval(callState.silenceInterval);
-
-    let offset = 0;
-    const playInterval = setInterval(() => {
-      if (offset >= playPcm.length || !activeCalls.has(callId)) {
-        clearInterval(playInterval);
-        console.log('Playback finished');
-        if (activeCalls.has(callId) && callState.source) {
-          const sr = 48000;
-          const pf = sr * 20 / 1000;
-          const silenceData = { samples: new Int16Array(pf), sampleRate: sr, bitsPerSample: 16, channelCount: 1 };
-          callState.silenceInterval = setInterval(() => {
-            try { callState.source.onData(silenceData); } catch (e) {}
-          }, 20);
-        }
-        return;
-      }
-
-      const end = Math.min(offset + frameSize * 2, playPcm.length);
-      const chunk = playPcm.slice(offset, end);
-      const samples = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.byteLength / 2);
-
-      try {
-        callState.source.onData({ samples, sampleRate: playRate, bitsPerSample, channelCount: numChannels });
-      } catch (e) { console.error('onData error:', e.message); }
-
-      offset = end;
-    }, 20);
-
-    callState.playInterval = playInterval;
+    console.log(`Playing: ${targetRate}Hz pcm=${playPcm.length} bytes`);
+    const pcmBase64 = playPcm.toString('base64');
+    bridgeWs.send(JSON.stringify({
+      type: 'audio',
+      pcm: pcmBase64,
+      sampleRate: targetRate,
+      channels: numChannels,
+      callId
+    }));
 
   } catch (err) {
     console.error('Playback error:', err.message);
@@ -358,27 +385,28 @@ async function sendAction(callId, action, sdp = null) {
 function cleanupCall(callId) {
   const callState = activeCalls.get(callId);
   if (callState) {
-    try {
-      if (callState.silenceInterval) clearInterval(callState.silenceInterval);
-      if (callState.playInterval) clearInterval(callState.playInterval);
-      callState.sink?.stop();
-      callState.source?.close();
-      callState.pc?.close();
-    } catch (e) {}
+    if (bridgeWs && bridgeWs.readyState === WebSocket.OPEN) {
+      bridgeWs.send(JSON.stringify({ type: 'stop', callId }));
+    }
     activeCalls.delete(callId);
     console.log(`Cleanup: ${callId}`);
   }
 }
 
 app.get('/api/status', (req, res) => {
-  res.json({ status: 'running', activeCalls: activeCalls.size });
+  res.json({ status: 'running', activeCalls: activeCalls.size, bridge: !!bridgeWs });
 });
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`StepTalk Voice Agent on port ${PORT}`);
   console.log(`Webhook: https://steptalk.onrender.com/webhook`);
+  try {
+    await launchBridge();
+  } catch (e) {
+    console.error('Bridge launch failed (will retry on call):', e.message);
+  }
 });

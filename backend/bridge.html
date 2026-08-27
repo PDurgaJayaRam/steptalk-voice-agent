@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head><title>StepTalk Bridge</title></head>
+<body>
+<script>
+const WS_URL = location.origin.replace(/^http/, 'ws') + '/bridge';
+let ws;
+let pc;
+let audioContext;
+let destination;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    console.log('Bridge connected');
+    ws.send(JSON.stringify({ type: 'ready' }));
+  };
+  ws.onmessage = async (event) => {
+    const msg = JSON.parse(event.data);
+    try {
+      await handleMessage(msg);
+    } catch (e) {
+      console.error('Handle error:', e);
+      ws.send(JSON.stringify({ type: 'error', error: e.message }));
+    }
+  };
+  ws.onclose = () => {
+    console.log('Bridge disconnected, reconnecting...');
+    setTimeout(connect, 1000);
+  };
+}
+
+async function handleMessage(msg) {
+  if (msg.type === 'offer') {
+    await setupPeerConnection(msg.sdp, msg.callId);
+  } else if (msg.type === 'audio') {
+    await playAudio(msg.pcm, msg.sampleRate, msg.channels);
+  } else if (msg.type === 'stop') {
+    if (pc) { pc.close(); pc = null; }
+    if (audioContext) { audioContext.close(); audioContext = null; }
+    ws.send(JSON.stringify({ type: 'stopped' }));
+  }
+}
+
+async function setupPeerConnection(offerSdp, callId) {
+  if (pc) { pc.close(); pc = null; }
+  currentCallId = callId;
+  audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+  destination = audioContext.createMediaStreamDestination();
+
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
+
+  const silentStream = destination.stream;
+  const audioTrack = silentStream.getAudioTracks()[0];
+  pc.addTrack(audioTrack, silentStream);
+
+  let audioTrackReceived = false;
+
+  pc.ontrack = (event) => {
+    if (audioTrackReceived) return;
+    audioTrackReceived = true;
+    console.log('Got remote track');
+    captureRemoteAudio(event.streams[0]);
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    console.log('ICE state:', pc.iceConnectionState);
+    ws.send(JSON.stringify({ type: 'ice', state: pc.iceConnectionState, callId }));
+  };
+
+  pc.onconnectionstatechange = () => {
+    console.log('Connection state:', pc.connectionState);
+    ws.send(JSON.stringify({ type: 'connection', state: pc.connectionState, callId }));
+  };
+
+  await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: offerSdp }));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+
+  ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp, callId }));
+}
+
+function captureRemoteAudio(stream) {
+  const source = audioContext.createMediaStreamSource(stream);
+  const bufferSize = 4096;
+  const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+  processor.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== 1) return;
+    const inputData = e.inputBuffer.getChannelData(0);
+    const int16 = new Int16Array(inputData.length);
+    for (let i = 0; i < inputData.length; i++) {
+      const s = Math.max(-1, Math.min(1, inputData[i]));
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    const bytes = new Uint8Array(int16.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    ws.send(JSON.stringify({
+      type: 'captured',
+      pcm: btoa(binary),
+      sampleRate: audioContext.sampleRate,
+      callId: currentCallId
+    }));
+  };
+
+  source.connect(processor);
+  processor.connect(audioContext.destination);
+}
+
+let currentCallId = null;
+
+async function playAudio(pcmBase64, sampleRate, channels) {
+  if (!audioContext) return;
+
+  const binary = atob(pcmBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const int16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) {
+    float32[i] = int16[i] / 32768.0;
+  }
+
+  const frameSize = 960;
+  let offset = 0;
+
+  return new Promise((resolve) => {
+    function playNext() {
+      if (offset >= float32.length) {
+        ws.send(JSON.stringify({ type: 'playback_done', callId: currentCallId }));
+        resolve();
+        return;
+      }
+      const end = Math.min(offset + frameSize, float32.length);
+      const chunk = float32.slice(offset, end);
+      const buffer = audioContext.createBuffer(1, chunk.length, sampleRate || 48000);
+      buffer.getChannelData(0).set(chunk);
+      const src = audioContext.createBufferSource();
+      src.buffer = buffer;
+      src.connect(destination);
+      src.onended = playNext;
+      src.start();
+      offset = end;
+    }
+    playNext();
+  });
+}
+
+connect();
+</script>
+</body>
+</html>
