@@ -10,10 +10,10 @@ const NVIDIA_ENDPOINT = process.env.NVIDIA_ENDPOINT || 'https://integrate.api.nv
 const NVIDIA_MODEL = process.env.NVIDIA_MODEL || 'meta/llama-3.1-8b-instruct';
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-async function transcribeAudio(audioBuffer) {
+async function transcribeAudio(wavBuffer) {
   try {
     const formData = new FormData();
-    formData.append('file', Readable.from(audioBuffer), { filename: 'audio.wav', contentType: 'audio/wav' });
+    formData.append('file', Readable.from(wavBuffer), { filename: 'audio.wav', contentType: 'audio/wav' });
     formData.append('model', 'whisper-large-v3');
     formData.append('language', 'en');
 

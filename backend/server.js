@@ -185,10 +185,9 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     }
 
     const wavBuffer = pcmToWav(audioToTranscribe, audioSampleRate, 1, 16);
-    const audioBlob = new Blob([wavBuffer], { type: 'audio/wav' });
 
     console.log(`Transcribing ${wavBuffer.length} byte WAV...`);
-    const text = await transcribeAudio(audioBlob);
+    const text = await transcribeAudio(wavBuffer);
     if (!text || text.trim().length === 0) {
       console.log('No speech detected');
       return;
