@@ -54,7 +54,8 @@ async function generateLLMResponse(userInput) {
         model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
         messages,
         stream: false,
-        max_tokens: 800
+        max_tokens: 512,
+        temperature: 0.3
       })
     });
 
@@ -67,16 +68,31 @@ async function generateLLMResponse(userInput) {
 
     if (data.choices && data.choices.length > 0) {
       let content = data.choices[0].message.content || '';
-      const match = content.match(/"([^"]+)"\s*$/);
-      if (match) return match[1].trim();
+      const quotedMatch = content.match(/"([^"]{5,})"\s*$/);
+      if (quotedMatch) return quotedMatch[1].trim();
+
       const lines = content.split('\n').filter(l => l.trim());
-      for (let i = lines.length - 1; i >= 0; i--) {
+      for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
         const line = lines[i].replace(/^["']|["']$/g, '').trim();
-        if (line.length > 10 && !line.includes('**') && !line.includes('Step ') && !line.match(/^\d/)) {
+        if (line.length > 5
+          && !line.startsWith('**')
+          && !line.match(/^\d[\.\)]/)
+          && !line.startsWith('-')
+          && !line.includes('StepTalk')
+          && !line.includes('system')
+          && !line.includes('thinking')
+          && !line.includes('Analyze')
+          && !line.includes('Response')
+          && !line.includes('Directly')
+          && !line.includes('Draft')
+          && !line.includes('Check')
+          && !line.includes('Constraints')
+          && !line.includes('Identify')
+          && !line.includes('Determine')) {
           return line;
         }
       }
-      return content.slice(-200).trim();
+      return content.slice(-100).trim();
     }
 
     throw new Error('No response from NVIDIA NIM');

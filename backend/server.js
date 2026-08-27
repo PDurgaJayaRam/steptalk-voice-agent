@@ -233,6 +233,8 @@ function playAudioToCall(callId, wavBuffer) {
 
     console.log(`Playing: ${playRate}Hz bits=${bitsPerSample} ch=${numChannels} pcm=${playPcm.length} bytes`);
 
+    if (callState.silenceInterval) clearInterval(callState.silenceInterval);
+
     const samplesPerChunk = Math.floor(playRate / 100) * numChannels;
     const bytesPerSample = bitsPerSample / 8;
     const chunkSize = samplesPerChunk * bytesPerSample;
@@ -242,6 +244,13 @@ function playAudioToCall(callId, wavBuffer) {
       if (offset >= playPcm.length || !activeCalls.has(callId)) {
         clearInterval(playInterval);
         console.log('Playback finished');
+        if (activeCalls.has(callId) && callState.source) {
+          const sr = 48000;
+          const silenceData = { samples: new Int16Array(sr / 100), sampleRate: sr };
+          callState.silenceInterval = setInterval(() => {
+            try { callState.source.onData(silenceData); } catch (e) {}
+          }, 10);
+        }
         return;
       }
 
