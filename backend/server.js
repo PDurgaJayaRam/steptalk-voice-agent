@@ -107,7 +107,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
       callState.sink = sink;
 
       let lastTranscript = Date.now();
-      let incomingSampleRate = data.sampleRate || 48000;
+      let incomingSampleRate = 48000;
 
       sink.ondata = (data) => {
         incomingSampleRate = data.sampleRate || 48000;
