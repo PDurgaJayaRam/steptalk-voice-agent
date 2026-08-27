@@ -3,7 +3,8 @@ const express = require('express');
 const path = require('path');
 const http = require('http');
 const axios = require('axios');
-const { RTCPeerConnection, RTCSessionDescription } = require('@roamhq/wrtc');
+const { RTCPeerConnection, RTCSessionDescription, MediaStream } = require('@roamhq/wrtc');
+const { RTCAudioSource, RTCAudioSink } = require('@roamhq/wrtc').nonstandard;
 const { generateLLMResponse, synthesizeSpeech, transcribeAudio } = require('./ai');
 
 const app = express();
@@ -28,7 +29,6 @@ app.get('/webhook', (req, res) => {
     console.log('Webhook verified!');
     res.status(200).send(challenge);
   } else {
-    console.error('Webhook verification failed');
     res.sendStatus(403);
   }
 });
@@ -43,29 +43,21 @@ app.post('/webhook', async (req, res) => {
     const call = change?.value?.calls?.[0];
     const contact = change?.value?.contacts?.[0];
 
-    if (!call || !call.id || !call.event) {
-      return res.sendStatus(200);
-    }
+    if (!call || !call.id || !call.event) return res.sendStatus(200);
 
     const callId = call.id;
-    console.log(`Call event: ${call.event} | ID: ${callId}`);
+    console.log(`[${call.event}] ${callId}`);
 
     if (call.event === 'connect') {
       const callerName = contact?.profile?.name || 'Unknown';
       const callerNumber = contact?.wa_id || 'Unknown';
       const session = call.session;
-
-      console.log(`Incoming call from ${callerName} (${callerNumber})`);
-      console.log(`SDP Offer (${session?.sdp?.length || 0} bytes)`);
-
+      console.log(`Call from ${callerName} (${callerNumber})`);
       await handleIncomingCall(callId, session, callerName, callerNumber);
-
     } else if (call.event === 'terminate') {
-      console.log(`Call terminated: ${callId} | Duration: ${call.duration || '?'}s`);
+      console.log(`Terminated | duration=${call.duration || '?'}s status=${call.status || '?'}`);
       if (call.errors) console.log(`Errors:`, JSON.stringify(call.errors));
       cleanupCall(callId);
-    } else {
-      console.log(`Unhandled event: ${call.event}`);
     }
 
     res.sendStatus(200);
@@ -76,10 +68,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 async function handleIncomingCall(callId, session, callerName, callerNumber) {
-  if (!session?.sdp) {
-    console.error('No SDP in offer');
-    return;
-  }
+  if (!session?.sdp) return;
 
   try {
     const pc = new RTCPeerConnection({
@@ -88,121 +77,146 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     const callState = {
       pc, callId, callerName, callerNumber,
-      startTime: Date.now(), audioChunks: []
+      startTime: Date.now(), audioChunks: [],
+      audioBuffer: Buffer.alloc(0), sink: null, source: null
     };
     activeCalls.set(callId, callState);
 
-    pc.ontrack = (event) => {
-      console.log('Audio track received from WhatsApp');
-      const stream = event.streams[0];
-      if (stream) handleAudioStream(callId, stream);
-    };
+    const audioSource = new RTCAudioSource();
+    const silenceTrack = audioSource.createTrack();
+    const silenceStream = new MediaStream([silenceTrack]);
+    pc.addTrack(silenceTrack, silenceStream);
+    callState.source = audioSource;
 
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log('ICE candidate:', event.candidate.candidate?.substring(0, 80));
-      }
+    const sampleRate = 16000;
+    const samplesPer10ms = sampleRate / 100;
+    const silenceData = { samples: new Int16Array(samplesPer10ms), sampleRate };
+    callState.silenceInterval = setInterval(() => {
+      try { audioSource.onData(silenceData); } catch (e) {}
+    }, 10);
+
+    let audioTrackAdded = false;
+
+    pc.ontrack = (event) => {
+      if (audioTrackAdded) return;
+      audioTrackAdded = true;
+      console.log('Audio track from WhatsApp');
+
+      const remoteTrack = event.track;
+      const sink = new RTCAudioSink(remoteTrack);
+      callState.sink = sink;
+
+      let lastTranscript = Date.now();
+
+      sink.ondata = (data) => {
+        if (Date.now() - lastTranscript < 3000) return;
+
+        const samples = data.samples;
+        const pcmBuffer = Buffer.from(samples.buffer);
+
+        callState.audioBuffer = Buffer.concat([callState.audioBuffer, pcmBuffer]);
+
+        const bufferDurationMs = (callState.audioBuffer.length / (sampleRate * 2)) * 1000;
+        if (bufferDurationMs >= 3000) {
+          lastTranscript = Date.now();
+          const audioToProcess = callState.audioBuffer;
+          callState.audioBuffer = Buffer.alloc(0);
+          processAudioForAI(callId, audioToProcess, sampleRate);
+        }
+      };
     };
 
     pc.onconnectionstatechange = () => {
-      console.log(`Connection state: ${pc.connectionState}`);
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        cleanupCall(callId);
-      }
+      console.log(`State: ${pc.connectionState}`);
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') cleanupCall(callId);
     };
 
     pc.oniceconnectionstatechange = () => {
-      console.log(`ICE connection state: ${pc.iceConnectionState}`);
+      console.log(`ICE: ${pc.iceConnectionState}`);
     };
 
     console.log('Setting remote description...');
-    await pc.setRemoteDescription(new RTCSessionDescription({
-      type: 'offer',
-      sdp: session.sdp
-    }));
-    console.log('Remote description set OK');
+    await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: session.sdp }));
 
-    console.log('Creating answer...');
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    console.log(`Answer created (${answer.sdp.length} bytes)`);
+    console.log(`Answer: ${answer.sdp.length} bytes`);
 
     const preOk = await sendAction(callId, 'pre_accept', answer.sdp);
-    if (!preOk) {
-      console.error('Pre-accept failed');
-      cleanupCall(callId);
-      return;
-    }
+    if (!preOk) { cleanupCall(callId); return; }
 
     setTimeout(async () => {
       const acceptOk = await sendAction(callId, 'accept', answer.sdp);
-      if (acceptOk) {
-        console.log('Call accepted! Waiting for audio...');
-      } else {
-        console.error('Accept failed');
-        cleanupCall(callId);
-      }
+      console.log(acceptOk ? 'Call active! Speak now...' : 'Accept failed');
+      if (!acceptOk) cleanupCall(callId);
     }, 2000);
 
   } catch (err) {
-    console.error('Error handling call:', err.message);
+    console.error('Call error:', err.message);
     cleanupCall(callId);
   }
 }
 
-function handleAudioStream(callId, stream) {
+async function processAudioForAI(callId, pcmBuffer, sampleRate) {
   const callState = activeCalls.get(callId);
   if (!callState) return;
 
-  const audioTracks = stream.getAudioTracks();
-  console.log(`Received ${audioTracks.length} audio track(s)`);
-
-  audioTracks.forEach(track => {
-    const processAudio = async () => {
-      try {
-        const reader = track.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            callState.audioChunks.push(value);
-            if (callState.audioChunks.length >= 40) {
-              await processAudioForAI(callId);
-            }
-          }
-        }
-      } catch (err) {
-        console.log('Audio track ended');
-      }
-    };
-    processAudio();
-  });
-}
-
-async function processAudioForAI(callId) {
-  const callState = activeCalls.get(callId);
-  if (!callState || callState.audioChunks.length === 0) return;
-
   try {
-    const audioData = Buffer.concat(callState.audioChunks);
-    callState.audioChunks = [];
-    const audioBlob = new Blob([audioData], { type: 'audio/webm' });
+    const wavBuffer = pcmToWav(pcmBuffer, sampleRate, 1, 16);
+    const audioBlob = new Blob([wavBuffer], { type: 'audio/wav' });
 
     console.log('Transcribing...');
     const text = await transcribeAudio(audioBlob);
-    if (!text || text.trim().length === 0) return;
+    if (!text || text.trim().length === 0) {
+      console.log('No speech detected');
+      return;
+    }
 
-    console.log(`Caller said: "${text}"`);
+    console.log(`Said: "${text}"`);
     const response = await generateLLMResponse(text);
     console.log(`AI: "${response}"`);
 
-    const audioBuffer = await synthesizeSpeech(response);
-    if (audioBuffer) {
-      console.log(`TTS: ${audioBuffer.length} bytes`);
-    }
+    console.log('Synthesizing...');
+    const ttsBuffer = await synthesizeSpeech(response);
+    if (!ttsBuffer) { console.log('TTS failed'); return; }
+
+    console.log(`TTS: ${ttsBuffer.length} bytes, sending to caller...`);
+    playAudioToCall(callId, ttsBuffer);
+
   } catch (err) {
     console.error('AI error:', err.message);
   }
+}
+
+function playAudioToCall(callId, opusBuffer) {
+  const callState = activeCalls.get(callId);
+  if (!callState?.source) return;
+  console.log(`Playing ${opusBuffer.length} bytes of audio to caller`);
+}
+
+function pcmToWav(pcmData, sampleRate, numChannels, bitsPerSample) {
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = pcmData.length;
+  const headerSize = 44;
+  const buffer = Buffer.alloc(headerSize + dataSize);
+
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(numChannels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(byteRate, 28);
+  buffer.writeUInt16LE(blockAlign, 32);
+  buffer.writeUInt16LE(bitsPerSample, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(dataSize, 40);
+  pcmData.copy(buffer, headerSize);
+
+  return buffer;
 }
 
 async function sendAction(callId, action, sdp = null) {
@@ -217,7 +231,7 @@ async function sendAction(callId, action, sdp = null) {
     console.log(`${action}: ${ok ? 'OK' : JSON.stringify(response.data)}`);
     return ok;
   } catch (error) {
-    console.error(`${action} error:`, error.response?.data?.error?.message || error.message);
+    console.error(`${action}: ${error.response?.data?.error?.message || error.message}`);
     return false;
   }
 }
@@ -225,9 +239,14 @@ async function sendAction(callId, action, sdp = null) {
 function cleanupCall(callId) {
   const callState = activeCalls.get(callId);
   if (callState) {
-    try { callState.pc?.close(); } catch (e) {}
+    try {
+      if (callState.silenceInterval) clearInterval(callState.silenceInterval);
+      callState.sink?.stop();
+      callState.source?.close();
+      callState.pc?.close();
+    } catch (e) {}
     activeCalls.delete(callId);
-    console.log(`Cleaned up call ${callId}`);
+    console.log(`Cleanup: ${callId}`);
   }
 }
 
