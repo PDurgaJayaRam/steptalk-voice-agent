@@ -84,6 +84,20 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     };
     activeCalls.set(callId, callState);
 
+    const audioSource = new RTCAudioSource();
+    const silenceTrack = audioSource.createTrack();
+    const silenceStream = new MediaStream([silenceTrack]);
+    pc.addTrack(silenceTrack, silenceStream);
+    callState.source = audioSource;
+
+    const sampleRate = 48000;
+    const ptime = 20;
+    const samplesPerFrame = sampleRate * ptime / 1000;
+    const silenceData = { samples: new Int16Array(samplesPerFrame), sampleRate, bitsPerSample: 16, channelCount: 1 };
+    callState.silenceInterval = setInterval(() => {
+      try { audioSource.onData(silenceData); } catch (e) {}
+    }, ptime);
+
     let audioTrackAdded = false;
 
     pc.ontrack = (event) => {
@@ -131,24 +145,16 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     console.log('Setting remote description...');
     await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: session.sdp }));
 
-    const audioSource = new RTCAudioSource();
-    const silenceTrack = audioSource.createTrack();
-    const silenceStream = new MediaStream([silenceTrack]);
-    pc.addTrack(silenceTrack, silenceStream);
-    callState.source = audioSource;
-
-    const sampleRate = 48000;
-    const ptime = 20;
-    const samplesPerFrame = sampleRate * ptime / 1000;
-    const silenceData = { samples: new Int16Array(samplesPerFrame), sampleRate, bitsPerSample: 16, channelCount: 1 };
-    callState.silenceInterval = setInterval(() => {
-      try { audioSource.onData(silenceData); } catch (e) {}
-    }, ptime);
-
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    const finalSdp = answer.sdp.replace(/a=setup:actpass/g, 'a=setup:active');
+    let finalSdp = answer.sdp.replace(/a=setup:actpass/g, 'a=setup:active');
+    
+    if (finalSdp.includes('a=inactive')) {
+      console.log('WARNING: SDP has inactive, forcing sendrecv');
+      finalSdp = finalSdp.replace(/a=inactive/g, 'a=sendrecv');
+    }
     console.log(`Answer: ${finalSdp.length} bytes`);
+    console.log('SDP audio lines:', finalSdp.split('\n').filter(l => l.startsWith('m=') || l.startsWith('a=send') || l.startsWith('a=recv') || l.startsWith('a=inactive')).join(' | '));
 
     const preOk = await sendAction(callId, 'pre_accept', finalSdp);
     if (!preOk) { cleanupCall(callId); return; }
