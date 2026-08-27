@@ -1,6 +1,7 @@
 require('dotenv').config();
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const FormData = require('form-data');
+const { Readable } = require('stream');
 
 const FISH_API_KEY = process.env.FISH_API_KEY;
 const FISH_VOICE_ID = process.env.FISH_VOICE_ID;
@@ -12,7 +13,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 async function transcribeAudio(audioBuffer) {
   try {
     const formData = new FormData();
-    formData.append('file', audioBuffer, { filename: 'audio.wav', contentType: 'audio/wav' });
+    formData.append('file', Readable.from(audioBuffer), { filename: 'audio.wav', contentType: 'audio/wav' });
     formData.append('model', 'whisper-large-v3');
     formData.append('language', 'en');
 
