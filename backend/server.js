@@ -146,7 +146,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
         return;
       }
       const silence = new Int16Array(960);
-      audioSource.ondata({
+      audioSource.onData({
         type: 'audio',
         timestamp: Date.now(),
         samples: silence,
@@ -337,7 +337,7 @@ function playAudioToCall(callId, wavBuffer) {
       if (offset >= int16.length || !callState.pc) {
         if (callState.silenceInterval) {
           const silence = new Int16Array(960);
-          callState.audioSource.ondata({
+          callState.audioSource.onData({
             type: 'audio',
             timestamp: Date.now(),
             samples: silence,
@@ -350,7 +350,7 @@ function playAudioToCall(callId, wavBuffer) {
       const frame = int16.slice(offset, end);
       const padded = new Int16Array(960);
       padded.set(frame);
-      callState.audioSource.ondata({
+      callState.audioSource.onData({
         type: 'audio',
         timestamp: Date.now(),
         samples: padded,
