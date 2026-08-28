@@ -4,13 +4,12 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
 async function transcribeAudio(wavBuffer) {
   try {
     const formData = new FormData();
     formData.append('file', Readable.from(wavBuffer), { filename: 'audio.wav', contentType: 'audio/wav' });
-    formData.append('model', 'whisper-large-v3');
+    formData.append('model', 'whisper-large-v3-turbo');
     formData.append('language', 'en');
 
     const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
@@ -38,24 +37,24 @@ async function generateLLMResponse(userInput) {
   const messages = [
     {
       role: 'system',
-      content: 'You are StepTalk AI, a professional sales assistant. Respond DIRECTLY to the customer in 1-2 short sentences. Never show your thinking process. Never use bullet points or numbered lists. Just speak naturally like a friendly human assistant would on a phone call.'
+      content: 'You are StepTalk AI, a professional and friendly voice assistant. Respond in 1-2 short sentences maximum. Speak naturally like a human on a phone call. Never use bullet points, lists, or markdown. Never show thinking tags. Keep responses under 30 words. Be concise, warm, and helpful.'
     },
     { role: 'user', content: userInput }
   ];
 
   try {
-    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${NVIDIA_API_KEY}`
+        'Authorization': `Bearer ${GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'nvidia/nemotron-3-nano-30b-a3b',
+        model: 'openai/gpt-oss-120b',
         messages,
         stream: false,
-        max_tokens: 256,
-        temperature: 0.3
+        max_tokens: 100,
+        temperature: 0.5
       })
     });
 
@@ -78,10 +77,62 @@ async function generateLLMResponse(userInput) {
   }
 }
 
+async function* generateLLMResponseStream(userInput) {
+  const messages = [
+    {
+      role: 'system',
+      content: 'You are StepTalk AI, a professional and friendly voice assistant. Respond in 1-2 short sentences maximum. Speak naturally like a human on a phone call. Never use bullet points, lists, or markdown. Never show thinking tags. Keep responses under 30 words. Be concise, warm, and helpful.'
+    },
+    { role: 'user', content: userInput }
+  ];
+
+  try {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${GROQ_API_KEY}`
+      },
+      body: JSON.stringify({
+        model: 'openai/gpt-oss-120b',
+        messages,
+        stream: true,
+        max_tokens: 100,
+        temperature: 0.5
+      })
+    });
+
+    const reader = response.body;
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    for await (const chunk of reader) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          if (data === '[DONE]') return;
+          try {
+            const parsed = JSON.parse(data);
+            const token = parsed.choices?.[0]?.delta?.content;
+            if (token) yield token;
+          } catch (e) {}
+        }
+      }
+    }
+  } catch (error) {
+    console.error('LLM Stream Error:', error.message);
+    yield "I'm sorry, I didn't catch that. Could you please repeat?";
+  }
+}
+
 async function synthesizeSpeech(text) {
   try {
     const voiceId = process.env.FISH_VOICE_ID;
-    console.log(`[TTS] Fish Audio: voice=${voiceId} text="${text.substring(0, 80)}..."`);
+    console.log(`[TTS] Fish Audio: voice=${voiceId} text="${text.substring(0, 60)}..."`);
 
     const response = await fetch('https://api.fish.audio/v1/tts', {
       method: 'POST',
@@ -99,9 +150,7 @@ async function synthesizeSpeech(text) {
         temperature: 0.0,
         top_p: 1.0,
         normalize: true,
-        prosody: { speed: 1, volume: 0, normalize_loudness: true },
-        repetition_penalty: 1.0,
-        condition_on_previous_chunks: true
+        prosody: { speed: 1.1, volume: 0, normalize_loudness: true }
       })
     });
 
@@ -111,9 +160,8 @@ async function synthesizeSpeech(text) {
       throw new Error(`Fish Audio API error: ${response.status}`);
     }
 
-    const contentType = response.headers.get('content-type');
     const buffer = Buffer.from(await response.arrayBuffer());
-    console.log(`[TTS] Fish Audio OK: ${buffer.length} bytes, content-type=${contentType}`);
+    console.log(`[TTS] Fish Audio OK: ${buffer.length} bytes`);
     return buffer;
   } catch (error) {
     console.error('[TTS] Error:', error.message);
@@ -121,4 +169,4 @@ async function synthesizeSpeech(text) {
   }
 }
 
-module.exports = { generateLLMResponse, synthesizeSpeech, transcribeAudio };
+module.exports = { generateLLMResponse, generateLLMResponseStream, synthesizeSpeech, transcribeAudio };

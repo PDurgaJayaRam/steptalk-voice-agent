@@ -3,9 +3,7 @@ const express = require('express');
 const path = require('path');
 const http = require('http');
 const axios = require('axios');
-const WebSocket = require('ws');
-const fs = require('fs');
-const { generateLLMResponse, synthesizeSpeech, transcribeAudio } = require('./ai');
+const { generateLLMResponse, generateLLMResponseStream, synthesizeSpeech, transcribeAudio } = require('./ai');
 
 const app = express();
 app.use(express.json());
@@ -19,6 +17,14 @@ const ACCESS_TOKEN = `Bearer ${process.env.META_ACCESS_TOKEN}`;
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN;
 
 const activeCalls = new Map();
+
+const VAD = {
+  SPEECH_THRESHOLD: 80,
+  SILENCE_THRESHOLD: 30,
+  MIN_SPEECH_FRAMES: 20,
+  SILENCE_AFTER_SPEECH_FRAMES: 50,
+  BARGE_IN_THRESHOLD: 200,
+};
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -77,7 +83,14 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
       callId, callerName, callerNumber,
       startTime: Date.now(),
       audioBuffer: Buffer.alloc(0),
-      silenceInterval: null
+      silenceInterval: null,
+      playbackTimeout: null,
+      isPlaying: false,
+      isProcessing: false,
+      vadState: 'IDLE',
+      vadSpeechFrames: 0,
+      vadSilenceFrames: 0,
+      captureCount: 0,
     };
     activeCalls.set(callId, callState);
 
@@ -93,18 +106,13 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     const audioTrack = audioSource.createTrack();
     pc.addTrack(audioTrack);
 
-    let audioSink = null;
-
     pc.ontrack = (event) => {
-      console.log(`[${callId}] ontrack: kind=${event.track.kind} enabled=${event.track.enabled} muted=${event.track.muted} readyState=${event.track.readyState}`);
       if (event.track.kind === 'audio') {
-        audioSink = new RTCAudioSink(event.track);
+        const audioSink = new RTCAudioSink(event.track);
         callState.audioSink = audioSink;
         audioSink.ondata = (data) => {
           handleCapturedAudio(callId, data);
         };
-        event.track.onunmute = () => console.log(`[${callId}] Remote track unmuted`);
-        event.track.onmute = () => console.log(`[${callId}] Remote track muted`);
       }
     };
 
@@ -140,26 +148,30 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     console.log(`[${callId}] accept: ${acceptOk ? 'OK' : 'FAILED'}`);
     if (!acceptOk) { cleanupCall(callId); return; }
 
-    callState.silenceInterval = setInterval(() => {
-      if (!callState.pc || callState.pc.connectionState === 'closed') {
-        clearInterval(callState.silenceInterval);
-        return;
-      }
-      const silence = new Int16Array(480);
-      audioSource.onData({
-        samples: silence,
-        sampleRate: 48000,
-        bitsPerSample: 16,
-        channelCount: 1
-      });
-    }, 10);
+    startSilenceStreaming(callState);
 
-    console.log(`[${callId}] Call active! Silence streaming started.`);
+    console.log(`[${callId}] Call active! Full-duplex VAD enabled.`);
 
   } catch (err) {
     console.error(`[${callId}] Call error:`, err.message);
     cleanupCall(callId);
   }
+}
+
+function startSilenceStreaming(callState) {
+  if (callState.silenceInterval) clearInterval(callState.silenceInterval);
+  callState.silenceInterval = setInterval(() => {
+    if (!callState.pc || callState.pc.connectionState === 'closed') {
+      clearInterval(callState.silenceInterval);
+      return;
+    }
+    callState.audioSource.onData({
+      samples: new Int16Array(480),
+      sampleRate: 48000,
+      bitsPerSample: 16,
+      channelCount: 1
+    });
+  }, 10);
 }
 
 function waitForIce(pc, callId, timeout = 8000) {
@@ -215,6 +227,17 @@ function cleanSdp(sdp) {
   return cleaned;
 }
 
+function computeFrameEnergy(samples) {
+  let sum = 0;
+  let max = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.abs(samples[i]);
+    sum += v;
+    if (v > max) max = v;
+  }
+  return { avg: sum / samples.length, max };
+}
+
 async function handleCapturedAudio(callId, data) {
   const callState = activeCalls.get(callId);
   if (!callState) return;
@@ -223,44 +246,64 @@ async function handleCapturedAudio(callId, data) {
     const { samples, sampleRate } = data;
     if (!samples || samples.length === 0) return;
 
-    let sum = 0;
-    let max = 0;
-    for (let i = 0; i < samples.length; i++) {
-      const v = Math.abs(samples[i]);
-      sum += v;
-      if (v > max) max = v;
-    }
-    const avg = sum / samples.length;
+    const { avg, max } = computeFrameEnergy(samples);
 
-    if (!callState.captureLogged) {
-      callState.captureCount = (callState.captureCount || 0) + 1;
-      if (callState.captureCount <= 5 || callState.captureCount % 50 === 0) {
-        console.log(`[${callId}] Capture #${callState.captureCount} avg=${avg.toFixed(4)} max=${max} len=${samples.length}`);
-      }
-      if (callState.captureCount === 5) callState.captureLogged = false;
-    }
+    callState.captureCount++;
 
-    if (avg < 50) return;
-
-    const int16 = samples instanceof Int16Array ? samples : new Int16Array(samples.length);
-    if (!(samples instanceof Int16Array)) {
-      for (let i = 0; i < samples.length; i++) {
-        const s = Math.max(-1, Math.min(1, samples[i]));
-        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      }
-    }
-
-    const binary = Buffer.from(int16.buffer);
-    callState.audioBuffer = Buffer.concat([callState.audioBuffer, binary]);
-
-    const rate = sampleRate || 48000;
-    const bufferDurationMs = (callState.audioBuffer.length / (rate * 2)) * 1000;
-
-    if (bufferDurationMs >= 1500) {
-      const audioToProcess = callState.audioBuffer;
+    if (callState.isPlaying && avg >= VAD.BARGE_IN_THRESHOLD) {
+      console.log(`[${callId}] BARGE-IN detected (avg=${avg.toFixed(0)}) — stopping playback`);
+      stopPlayback(callState);
       callState.audioBuffer = Buffer.alloc(0);
-      processAudioForAI(callId, audioToProcess, rate);
+      callState.vadState = 'SPEAKING';
+      callState.vadSpeechFrames = 1;
+      callState.vadSilenceFrames = 0;
+      const binary = Buffer.from(samples instanceof Int16Array ? samples.buffer : new Int16Array(samples).buffer);
+      callState.audioBuffer = Buffer.concat([callState.audioBuffer, binary]);
+      return;
     }
+
+    if (callState.isProcessing) return;
+
+    switch (callState.vadState) {
+      case 'IDLE':
+        if (avg >= VAD.SPEECH_THRESHOLD) {
+          callState.vadSpeechFrames++;
+          if (callState.vadSpeechFrames >= VAD.MIN_SPEECH_FRAMES) {
+            callState.vadState = 'SPEAKING';
+            callState.audioBuffer = Buffer.alloc(0);
+            const binary = Buffer.from(samples instanceof Int16Array ? samples.buffer : new Int16Array(samples).buffer);
+            callState.audioBuffer = Buffer.concat([callState.audioBuffer, binary]);
+          }
+        } else {
+          callState.vadSpeechFrames = 0;
+        }
+        break;
+
+      case 'SPEAKING':
+        const binarySpeak = Buffer.from(samples instanceof Int16Array ? samples.buffer : new Int16Array(samples).buffer);
+        callState.audioBuffer = Buffer.concat([callState.audioBuffer, binarySpeak]);
+
+        if (avg < VAD.SILENCE_THRESHOLD) {
+          callState.vadSilenceFrames++;
+          if (callState.vadSilenceFrames >= VAD.SILENCE_AFTER_SPEECH_FRAMES) {
+            callState.vadState = 'IDLE';
+            callState.vadSpeechFrames = 0;
+            callState.vadSilenceFrames = 0;
+
+            const audioToProcess = callState.audioBuffer;
+            callState.audioBuffer = Buffer.alloc(0);
+
+            if (audioToProcess.length > 0) {
+              callState.isProcessing = true;
+              processAudioForAI(callId, audioToProcess, sampleRate || 48000);
+            }
+          }
+        } else {
+          callState.vadSilenceFrames = 0;
+        }
+        break;
+    }
+
   } catch (e) {
     console.error(`[${callId}] Capture error:`, e.message);
   }
@@ -274,10 +317,12 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     const samples = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength / 2);
     const sum = samples.reduce((acc, val) => acc + Math.abs(val), 0);
     const avg = sum / samples.length;
-    console.log(`[${callId}] Audio: ${pcmBuffer.length} bytes, ${sampleRate}Hz, avg=${avg.toFixed(1)}`);
+    const durationMs = (pcmBuffer.length / (sampleRate * 2)) * 1000;
+    console.log(`[${callId}] Audio: ${pcmBuffer.length} bytes, ${sampleRate}Hz, avg=${avg.toFixed(1)}, dur=${durationMs.toFixed(0)}ms`);
 
-    if (avg < 50) {
-      console.log(`[${callId}] Audio too quiet, skipping`);
+    if (avg < 30 || durationMs < 200) {
+      console.log(`[${callId}] Audio too quiet/short, skipping`);
+      callState.isProcessing = false;
       return;
     }
 
@@ -289,27 +334,78 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     }
 
     const wavBuffer = pcmToWav(audioToTranscribe, audioSampleRate, 1, 16);
-    console.log(`[${callId}] Transcribing ${wavBuffer.length} byte WAV...`);
+    const sttStart = Date.now();
     const text = await transcribeAudio(wavBuffer);
+    const sttMs = Date.now() - sttStart;
+    console.log(`[${callId}] STT (${sttMs}ms): "${text}"`);
+
     if (!text || text.trim().length === 0) {
       console.log(`[${callId}] No speech detected`);
+      callState.isProcessing = false;
       return;
     }
 
-    console.log(`[${callId}] Said: "${text}"`);
-    const response = await generateLLMResponse(text);
-    console.log(`[${callId}] AI: "${response}"`);
+    const llmStart = Date.now();
+    let sentenceBuffer = '';
+    let sentenceCount = 0;
 
-    console.log(`[${callId}] Synthesizing...`);
-    const ttsBuffer = await synthesizeSpeech(response);
-    if (!ttsBuffer) { console.log(`[${callId}] TTS failed`); return; }
+    for await (const token of generateLLMResponseStream(text)) {
+      if (callState.vadState === 'SPEAKING' || (!callState.pc || callState.pc.connectionState === 'closed')) {
+        console.log(`[${callId}] LLM streaming interrupted`);
+        break;
+      }
 
-    console.log(`[${callId}] TTS: ${ttsBuffer.length} bytes, playing...`);
-    playAudioToCall(callId, ttsBuffer);
+      sentenceBuffer += token;
+
+      const sentenceEnd = sentenceBuffer.match(/[.!?]+[\s"']*/);
+      if (sentenceEnd) {
+        const sentenceEndIndex = sentenceBuffer.indexOf(sentenceEnd[0]) + sentenceEnd[0].length;
+        const sentence = sentenceBuffer.slice(0, sentenceEndIndex).trim();
+        sentenceBuffer = sentenceBuffer.slice(sentenceEndIndex);
+
+        if (sentence.length > 5) {
+          sentenceCount++;
+          const ttsStart = Date.now();
+          const ttsBuffer = await synthesizeSpeech(sentence);
+          const ttsMs = Date.now() - ttsStart;
+
+          if (ttsBuffer && !callState.vadState === 'SPEAKING') {
+            console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
+            playAudioToCall(callId, ttsBuffer);
+          }
+        }
+      }
+    }
+
+    if (sentenceBuffer.trim().length > 5) {
+      sentenceCount++;
+      const ttsStart = Date.now();
+      const ttsBuffer = await synthesizeSpeech(sentenceBuffer.trim());
+      const ttsMs = Date.now() - ttsStart;
+
+      if (ttsBuffer && callState.vadState !== 'SPEAKING') {
+        console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
+        playAudioToCall(callId, ttsBuffer);
+      }
+    }
+
+    const llmMs = Date.now() - llmStart;
+    console.log(`[${callId}] LLM stream complete (${llmMs}ms, ${sentenceCount} sentences)`);
+
+    callState.isProcessing = false;
 
   } catch (err) {
     console.error(`[${callId}] AI error:`, err.message);
+    callState.isProcessing = false;
   }
+}
+
+function stopPlayback(callState) {
+  if (callState.playbackTimeout) {
+    clearTimeout(callState.playbackTimeout);
+    callState.playbackTimeout = null;
+  }
+  callState.isPlaying = false;
 }
 
 function playAudioToCall(callId, wavBuffer) {
@@ -317,19 +413,16 @@ function playAudioToCall(callId, wavBuffer) {
   if (!callState || !callState.audioSource) return;
 
   try {
+    stopPlayback(callState);
     if (callState.silenceInterval) {
       clearInterval(callState.silenceInterval);
       callState.silenceInterval = null;
-    }
-    if (callState.playbackTimeout) {
-      clearTimeout(callState.playbackTimeout);
-      callState.playbackTimeout = null;
     }
 
     const headerSize = 44;
     if (wavBuffer.length <= headerSize) {
       console.log(`[${callId}] WAV too small: ${wavBuffer.length} bytes`);
-      restartSilence(callState);
+      startSilenceStreaming(callState);
       return;
     }
 
@@ -360,11 +453,12 @@ function playAudioToCall(callId, wavBuffer) {
       if (v < pcmMin) pcmMin = v;
     }
     const pcmAvg = pcmSum / int16.length;
-    const samples = [int16[0], int16[1], int16[2], int16[3], int16[4]];
-    console.log(`[${callId}] PCM: ${int16.length} samples (${(int16.length/48000).toFixed(2)}s) max=${pcmMax} min=${pcmMin} avg=${pcmAvg.toFixed(1)} first5=[${samples}]`);
+    console.log(`[${callId}] PCM: ${int16.length} samples (${(int16.length/48000).toFixed(2)}s) max=${pcmMax} min=${pcmMin} avg=${pcmAvg.toFixed(1)}`);
 
     if (pcmMax === 0) {
       console.log(`[${callId}] WARNING: PCM data is SILENT (all zeros)`);
+      startSilenceStreaming(callState);
+      return;
     }
 
     const frames = [];
@@ -376,14 +470,18 @@ function playAudioToCall(callId, wavBuffer) {
       frames.push(padded);
     }
 
-    console.log(`[${callId}] TTS: ${frames.length} frames, ${(frames.length * 10 / 1000).toFixed(1)}s playback`);
+    console.log(`[${callId}] Playback: ${frames.length} frames, ${(frames.length * 10 / 1000).toFixed(1)}s`);
 
+    callState.isPlaying = true;
     const frameInterval = 10;
     let frameIndex = 0;
     const startTime = Date.now();
 
     const sendFrame = () => {
-      if (!callState.pc || callState.pc.connectionState === 'closed') return;
+      if (!callState.pc || callState.pc.connectionState === 'closed' || !callState.isPlaying) {
+        callState.isPlaying = false;
+        return;
+      }
 
       const elapsed = Date.now() - startTime;
       const expectedFrame = Math.floor(elapsed / frameInterval);
@@ -402,8 +500,9 @@ function playAudioToCall(callId, wavBuffer) {
         const nextFrameTime = startTime + (frameIndex * frameInterval) - Date.now();
         callState.playbackTimeout = setTimeout(sendFrame, Math.max(1, nextFrameTime));
       } else {
-        console.log(`[${callId}] TTS playback complete (${frames.length} frames)`);
-        restartSilence(callState);
+        console.log(`[${callId}] Playback complete (${frames.length} frames)`);
+        callState.isPlaying = false;
+        startSilenceStreaming(callState);
       }
     };
 
@@ -411,24 +510,9 @@ function playAudioToCall(callId, wavBuffer) {
 
   } catch (err) {
     console.error(`[${callId}] Playback error:`, err.message);
-    restartSilence(callState);
+    callState.isPlaying = false;
+    startSilenceStreaming(callState);
   }
-}
-
-function restartSilence(callState) {
-  if (callState.silenceInterval) clearInterval(callState.silenceInterval);
-  callState.silenceInterval = setInterval(() => {
-    if (!callState.pc || callState.pc.connectionState === 'closed') {
-      clearInterval(callState.silenceInterval);
-      return;
-    }
-    callState.audioSource.onData({
-      samples: new Int16Array(480),
-      sampleRate: 48000,
-      bitsPerSample: 16,
-      channelCount: 1
-    });
-  }, 10);
 }
 
 function upsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
