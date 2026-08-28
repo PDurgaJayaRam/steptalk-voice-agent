@@ -327,10 +327,23 @@ function playAudioToCall(callId, wavBuffer) {
     }
 
     const headerSize = 44;
-    if (wavBuffer.length <= headerSize) { restartSilence(callState); return; }
+    if (wavBuffer.length <= headerSize) {
+      console.log(`[${callId}] WAV too small: ${wavBuffer.length} bytes`);
+      restartSilence(callState);
+      return;
+    }
+
+    const riff = wavBuffer.toString('ascii', 0, 4);
+    const wave = wavBuffer.toString('ascii', 8, 12);
+    const fmt = wavBuffer.toString('ascii', 12, 16);
+    const audioFormat = wavBuffer.readUInt16LE(20);
+    const numChannels = wavBuffer.readUInt16LE(22);
+    const srcRate = wavBuffer.readUInt32LE(24) || 44100;
+    const bitsPerSample = wavBuffer.readUInt16LE(34);
+    const dataSize = wavBuffer.readUInt32LE(40);
+    console.log(`[${callId}] WAV: riff=${riff} wave=${wave} fmt=${fmt} format=${audioFormat} ch=${numChannels} rate=${srcRate} bits=${bitsPerSample} dataSize=${dataSize} total=${wavBuffer.length}`);
 
     const pcmData = wavBuffer.slice(headerSize);
-    const srcRate = wavBuffer.readUInt32LE(24) || 44100;
     const targetRate = 48000;
 
     let playPcm = pcmData;
@@ -338,8 +351,23 @@ function playAudioToCall(callId, wavBuffer) {
       playPcm = upsampleBuffer(pcmData, srcRate, targetRate);
     }
 
-    const frames = [];
     const int16 = new Int16Array(playPcm.buffer, playPcm.byteOffset, playPcm.byteLength / 2);
+    let pcmMax = 0, pcmMin = 0, pcmSum = 0;
+    for (let i = 0; i < int16.length; i++) {
+      const v = int16[i];
+      pcmSum += Math.abs(v);
+      if (v > pcmMax) pcmMax = v;
+      if (v < pcmMin) pcmMin = v;
+    }
+    const pcmAvg = pcmSum / int16.length;
+    const samples = [int16[0], int16[1], int16[2], int16[3], int16[4]];
+    console.log(`[${callId}] PCM: ${int16.length} samples (${(int16.length/48000).toFixed(2)}s) max=${pcmMax} min=${pcmMin} avg=${pcmAvg.toFixed(1)} first5=[${samples}]`);
+
+    if (pcmMax === 0) {
+      console.log(`[${callId}] WARNING: PCM data is SILENT (all zeros)`);
+    }
+
+    const frames = [];
     const frameSize = 480;
     for (let i = 0; i < int16.length; i += frameSize) {
       const padded = new Int16Array(480);
@@ -348,8 +376,9 @@ function playAudioToCall(callId, wavBuffer) {
       frames.push(padded);
     }
 
+    console.log(`[${callId}] TTS: ${frames.length} frames, ${(frames.length * 10 / 1000).toFixed(1)}s playback`);
+
     const frameInterval = 10;
-    const totalDuration = frames.length * frameInterval;
     let frameIndex = 0;
     const startTime = Date.now();
 
