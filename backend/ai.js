@@ -114,15 +114,20 @@ async function synthesizeSpeech(text) {
       body: JSON.stringify({
         text,
         reference_id: process.env.FISH_VOICE_ID,
-        format: 'wav'
+        format: 'wav',
+        latency: 'normal',
+        sample_rate: 44100
       })
     });
 
     if (!response.ok) {
+      const errText = await response.text();
+      console.error(`Fish Audio error ${response.status}: ${errText}`);
       throw new Error(`Fish Audio API error: ${response.status}`);
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());
+    console.log(`[TTS] Fish Audio returned ${buffer.length} bytes for "${text.substring(0, 40)}..."`);
     return buffer;
   } catch (error) {
     console.error('TTS Error:', error.message);
