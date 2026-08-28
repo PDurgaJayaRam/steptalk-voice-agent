@@ -51,7 +51,7 @@ async function generateLLMResponse(userInput) {
         'Authorization': `Bearer ${NVIDIA_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'stepfun-ai/step-3.7-flash',
+        model: 'nvidia/nemotron-3-nano-30b-a3b',
         messages,
         stream: false,
         max_tokens: 100,
@@ -95,7 +95,7 @@ async function* generateLLMResponseStream(userInput) {
         'Authorization': `Bearer ${NVIDIA_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'stepfun-ai/step-3.7-flash',
+        model: 'nvidia/nemotron-3-nano-30b-a3b',
         messages,
         stream: true,
         max_tokens: 100,
