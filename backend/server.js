@@ -236,6 +236,11 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     if (finalSdp.includes('a=inactive')) {
       finalSdp = finalSdp.replace(/a=inactive/g, 'a=sendrecv');
     }
+    finalSdp = finalSdp.replace(/a=ice-options:trickle\r?\n/g, '');
+    finalSdp = finalSdp.split('\n').filter(l => {
+      if (l.startsWith('a=candidate:') && l.includes('.local')) return false;
+      return true;
+    }).join('\n');
     console.log(`Answer: ${finalSdp.length} bytes`);
     console.log('=== ANSWER SDP ===');
     console.log(finalSdp);
