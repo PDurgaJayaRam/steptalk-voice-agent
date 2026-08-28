@@ -136,7 +136,8 @@ async function launchBridge() {
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--single-process'
+      '--single-process',
+      '--autoplay-policy=no-user-gesture-required'
     ]
   });
 
