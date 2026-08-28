@@ -256,7 +256,7 @@ async function handleCapturedAudio(callId, data) {
     const rate = sampleRate || 48000;
     const bufferDurationMs = (callState.audioBuffer.length / (rate * 2)) * 1000;
 
-    if (bufferDurationMs >= 3000) {
+    if (bufferDurationMs >= 1500) {
       const audioToProcess = callState.audioBuffer;
       callState.audioBuffer = Buffer.alloc(0);
       processAudioForAI(callId, audioToProcess, rate);
@@ -317,8 +317,17 @@ function playAudioToCall(callId, wavBuffer) {
   if (!callState || !callState.audioSource) return;
 
   try {
+    if (callState.silenceInterval) {
+      clearInterval(callState.silenceInterval);
+      callState.silenceInterval = null;
+    }
+    if (callState.playbackTimeout) {
+      clearTimeout(callState.playbackTimeout);
+      callState.playbackTimeout = null;
+    }
+
     const headerSize = 44;
-    if (wavBuffer.length <= headerSize) return;
+    if (wavBuffer.length <= headerSize) { restartSilence(callState); return; }
 
     const pcmData = wavBuffer.slice(headerSize);
     const srcRate = wavBuffer.readUInt32LE(24) || 44100;
@@ -329,41 +338,68 @@ function playAudioToCall(callId, wavBuffer) {
       playPcm = upsampleBuffer(pcmData, srcRate, targetRate);
     }
 
+    const frames = [];
     const int16 = new Int16Array(playPcm.buffer, playPcm.byteOffset, playPcm.byteLength / 2);
     const frameSize = 480;
-    let offset = 0;
-
-    const playNext = () => {
-      if (offset >= int16.length || !callState.pc) {
-        if (callState.silenceInterval) {
-      const silence = new Int16Array(480);
-          callState.audioSource.onData({
-            samples: silence,
-            sampleRate: 48000,
-            bitsPerSample: 16,
-            channelCount: 1
-          });
-        }
-        return;
-      }
-      const end = Math.min(offset + frameSize, int16.length);
-      const frame = int16.slice(offset, end);
+    for (let i = 0; i < int16.length; i += frameSize) {
       const padded = new Int16Array(480);
-      padded.set(frame);
-      callState.audioSource.onData({
-        samples: padded,
-        sampleRate: 48000,
-        bitsPerSample: 16,
-        channelCount: 1
-      });
-      offset = end;
-      setTimeout(playNext, 10);
+      const end = Math.min(i + frameSize, int16.length);
+      padded.set(int16.slice(i, end));
+      frames.push(padded);
+    }
+
+    const frameInterval = 10;
+    const totalDuration = frames.length * frameInterval;
+    let frameIndex = 0;
+    const startTime = Date.now();
+
+    const sendFrame = () => {
+      if (!callState.pc || callState.pc.connectionState === 'closed') return;
+
+      const elapsed = Date.now() - startTime;
+      const expectedFrame = Math.floor(elapsed / frameInterval);
+
+      while (frameIndex < frames.length && frameIndex <= expectedFrame) {
+        callState.audioSource.onData({
+          samples: frames[frameIndex],
+          sampleRate: 48000,
+          bitsPerSample: 16,
+          channelCount: 1
+        });
+        frameIndex++;
+      }
+
+      if (frameIndex < frames.length) {
+        const nextFrameTime = startTime + (frameIndex * frameInterval) - Date.now();
+        callState.playbackTimeout = setTimeout(sendFrame, Math.max(1, nextFrameTime));
+      } else {
+        console.log(`[${callId}] TTS playback complete (${frames.length} frames)`);
+        restartSilence(callState);
+      }
     };
-    playNext();
+
+    sendFrame();
 
   } catch (err) {
     console.error(`[${callId}] Playback error:`, err.message);
+    restartSilence(callState);
   }
+}
+
+function restartSilence(callState) {
+  if (callState.silenceInterval) clearInterval(callState.silenceInterval);
+  callState.silenceInterval = setInterval(() => {
+    if (!callState.pc || callState.pc.connectionState === 'closed') {
+      clearInterval(callState.silenceInterval);
+      return;
+    }
+    callState.audioSource.onData({
+      samples: new Int16Array(480),
+      sampleRate: 48000,
+      bitsPerSample: 16,
+      channelCount: 1
+    });
+  }, 10);
 }
 
 function upsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
@@ -439,6 +475,7 @@ function cleanupCall(callId) {
   const callState = activeCalls.get(callId);
   if (callState) {
     if (callState.silenceInterval) clearInterval(callState.silenceInterval);
+    if (callState.playbackTimeout) clearTimeout(callState.playbackTimeout);
     if (callState.audioSink) { try { callState.audioSink.close(); } catch(e) {} }
     if (callState.audioSource) { try { callState.audioSource.close(); } catch(e) {} }
     if (callState.pc) { try { callState.pc.close(); } catch(e) {} }
