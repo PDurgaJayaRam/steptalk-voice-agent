@@ -99,7 +99,9 @@ async function synthesizeSpeech(text) {
         temperature: 0.0,
         top_p: 1.0,
         normalize: true,
-        prosody: { speed: 1, volume: 0, normalize_loudness: true }
+        prosody: { speed: 1, volume: 0, normalize_loudness: true },
+        repetition_penalty: 1.0,
+        condition_on_previous_chunks: true
       })
     });
 
