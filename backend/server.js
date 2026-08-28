@@ -253,6 +253,11 @@ async function handleCapturedAudio(callId, data) {
     if (callState.isPlaying && avg >= VAD.BARGE_IN_THRESHOLD) {
       console.log(`[${callId}] BARGE-IN detected (avg=${avg.toFixed(0)}) — stopping playback`);
       stopPlayback(callState);
+      if (callState.processingTimeout) {
+        clearTimeout(callState.processingTimeout);
+        callState.processingTimeout = null;
+      }
+      callState.isProcessing = false;
       callState.audioBuffer = Buffer.alloc(0);
       callState.vadState = 'SPEAKING';
       callState.vadSpeechFrames = 1;
@@ -295,6 +300,12 @@ async function handleCapturedAudio(callId, data) {
 
             if (audioToProcess.length > 0) {
               callState.isProcessing = true;
+              callState.processingTimeout = setTimeout(() => {
+                if (callState.isProcessing) {
+                  console.log(`[${callId}] WARNING: isProcessing stuck for 15s, resetting`);
+                  callState.isProcessing = false;
+                }
+              }, 15000);
               processAudioForAI(callId, audioToProcess, sampleRate || 48000);
             }
           }
@@ -358,10 +369,18 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       sentenceBuffer += token;
 
       const sentenceEnd = sentenceBuffer.match(/[.!?]+[\s"']*/);
-      if (sentenceEnd) {
-        const sentenceEndIndex = sentenceBuffer.indexOf(sentenceEnd[0]) + sentenceEnd[0].length;
-        const sentence = sentenceBuffer.slice(0, sentenceEndIndex).trim();
-        sentenceBuffer = sentenceBuffer.slice(sentenceEndIndex);
+      const shouldFlush = sentenceEnd || sentenceBuffer.length > 80;
+      if (shouldFlush) {
+        let sentence, rest;
+        if (sentenceEnd) {
+          const sentenceEndIndex = sentenceBuffer.indexOf(sentenceEnd[0]) + sentenceEnd[0].length;
+          sentence = sentenceBuffer.slice(0, sentenceEndIndex).trim();
+          rest = sentenceBuffer.slice(sentenceEndIndex);
+        } else {
+          sentence = sentenceBuffer.trim();
+          rest = '';
+        }
+        sentenceBuffer = rest;
 
         if (sentence.length > 3) {
           sentenceCount++;
@@ -393,10 +412,18 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     const llmMs = Date.now() - llmStart;
     console.log(`[${callId}] LLM stream complete (${llmMs}ms, ${sentenceCount} sentences)`);
 
+    if (callState.processingTimeout) {
+      clearTimeout(callState.processingTimeout);
+      callState.processingTimeout = null;
+    }
     callState.isProcessing = false;
 
   } catch (err) {
     console.error(`[${callId}] AI error:`, err.message);
+    if (callState.processingTimeout) {
+      clearTimeout(callState.processingTimeout);
+      callState.processingTimeout = null;
+    }
     callState.isProcessing = false;
   }
 }
@@ -590,6 +617,7 @@ function cleanupCall(callId) {
   if (callState) {
     if (callState.silenceInterval) clearInterval(callState.silenceInterval);
     if (callState.playbackTimeout) clearTimeout(callState.playbackTimeout);
+    if (callState.processingTimeout) clearTimeout(callState.processingTimeout);
     if (callState.audioSink) { try { callState.audioSink.close(); } catch(e) {} }
     if (callState.audioSource) { try { callState.audioSource.close(); } catch(e) {} }
     if (callState.pc) { try { callState.pc.close(); } catch(e) {} }
