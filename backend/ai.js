@@ -62,7 +62,6 @@ async function generateLLMResponse(userInput) {
     const data = await response.json();
 
     if (data.error) {
-      console.error('NVIDIA LLM error:', JSON.stringify(data.error));
       throw new Error(data.error.message);
     }
 
@@ -72,32 +71,9 @@ async function generateLLMResponse(userInput) {
       if (content.length > 0) return content;
     }
 
-    throw new Error('No response from NVIDIA NIM');
+    throw new Error('No response from LLM');
   } catch (error) {
-    console.error('NVIDIA failed, trying Groq:', error.message);
-    try {
-      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${GROQ_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: 'qwen/qwen3.8-27b',
-          messages,
-          max_tokens: 256,
-          temperature: 0.3
-        })
-      });
-      const groqData = await groqRes.json();
-      if (groqData.choices && groqData.choices.length > 0) {
-        let content = groqData.choices[0].message.content || '';
-        content = content.replace(/<think>[\s\S]*?<\/thought>/g, '').trim();
-        if (content.length > 0) return content;
-      }
-    } catch (groqErr) {
-      console.error('Groq LLM Error:', groqErr.message);
-    }
+    console.error('LLM Error:', error.message);
     return "I'm sorry, I didn't catch that. Could you please repeat?";
   }
 }
@@ -109,14 +85,13 @@ async function synthesizeSpeech(text) {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.FISH_API_KEY}`,
-        'model': 's2.1-pro-free'
+        'model': 's2-pro'
       },
       body: JSON.stringify({
         text,
         reference_id: process.env.FISH_VOICE_ID,
         format: 'wav',
-        latency: 'normal',
-        sample_rate: 44100
+        latency: 'normal'
       })
     });
 
@@ -127,7 +102,7 @@ async function synthesizeSpeech(text) {
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());
-    console.log(`[TTS] Fish Audio returned ${buffer.length} bytes for "${text.substring(0, 40)}..."`);
+    console.log(`[TTS] Fish Audio s2-pro returned ${buffer.length} bytes`);
     return buffer;
   } catch (error) {
     console.error('TTS Error:', error.message);
