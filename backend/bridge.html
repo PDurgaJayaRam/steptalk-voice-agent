@@ -36,10 +36,9 @@ async function handleMessage(msg) {
   if (msg.type === 'offer') {
     await setupPeerConnection(msg.sdp, msg.callId);
   } else if (msg.type === 'audio') {
-    await playAudio(msg.pcm, msg.sampleRate, msg.channels);
+    playAudio(msg.pcm, msg.sampleRate, msg.channels);
   } else if (msg.type === 'stop') {
     if (pc) { pc.close(); pc = null; }
-    if (audioContext) { audioContext.close(); audioContext = null; }
   }
 }
 
@@ -62,23 +61,30 @@ async function setupPeerConnection(offerSdp, callId) {
   const audioTrack = destination.stream.getAudioTracks()[0];
   pc.addTrack(audioTrack, destination.stream);
 
-  let audioTrackReceived = false;
-
   pc.ontrack = (event) => {
-    if (audioTrackReceived) return;
-    audioTrackReceived = true;
-    console.log('Got remote track');
-    captureRemoteAudio(event.streams[0]);
+    console.log('ontrack fired, kind:', event.track.kind, 'streams:', event.streams.length);
+    const stream = event.streams[0];
+    if (!stream) {
+      console.log('No stream in ontrack event');
+      return;
+    }
+    captureRemoteAudio(stream);
   };
 
   pc.oniceconnectionstatechange = () => {
-    console.log('ICE state:', pc.iceConnectionState);
-    ws.send(JSON.stringify({ type: 'ice', state: pc.iceConnectionState, callId }));
+    const state = pc.iceConnectionState;
+    console.log('ICE state:', state);
+    ws.send(JSON.stringify({ type: 'ice', state, callId }));
   };
 
   pc.onconnectionstatechange = () => {
-    console.log('Connection state:', pc.connectionState);
-    ws.send(JSON.stringify({ type: 'connection', state: pc.connectionState, callId }));
+    const state = pc.connectionState;
+    console.log('Connection state:', state);
+    ws.send(JSON.stringify({ type: 'connection', state, callId }));
+  };
+
+  pc.onicegatheringstatechange = () => {
+    console.log('ICE gathering:', pc.iceGatheringState);
   };
 
   console.log('Setting remote description...');
@@ -92,38 +98,62 @@ async function setupPeerConnection(offerSdp, callId) {
 
 function captureRemoteAudio(stream) {
   if (!stream) return;
-  const source = audioContext.createMediaStreamSource(stream);
-  const bufferSize = 4096;
-  const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+  console.log('Audio tracks in stream:', stream.getTracks().length);
 
-  processor.onaudioprocess = (e) => {
-    if (!ws || ws.readyState !== 1) return;
-    const inputData = e.inputBuffer.getChannelData(0);
-    const int16 = new Int16Array(inputData.length);
-    for (let i = 0; i < inputData.length; i++) {
-      const s = Math.max(-1, Math.min(1, inputData[i]));
-      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    }
-    const bytes = new Uint8Array(int16.buffer);
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    ws.send(JSON.stringify({
-      type: 'captured',
-      pcm: btoa(binary),
-      sampleRate: audioContext.sampleRate,
-      callId: currentCallId
-    }));
-  };
+  try {
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
 
-  source.connect(processor);
-  processor.connect(audioContext.destination);
+    source.connect(analyser);
+
+    console.log('Starting audio capture via ScriptProcessor');
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    let captureCount = 0;
+
+    processor.onaudioprocess = (e) => {
+      const inputData = e.inputBuffer.getChannelData(0);
+      let sum = 0;
+      for (let i = 0; i < inputData.length; i++) {
+        sum += Math.abs(inputData[i]);
+      }
+      const avg = sum / inputData.length;
+
+      captureCount++;
+      if (captureCount <= 3 || captureCount % 50 === 0) {
+        console.log('Capture #' + captureCount + ' avg=' + avg.toFixed(4) + ' len=' + inputData.length);
+      }
+
+      if (avg < 0.001) return;
+
+      const int16 = new Int16Array(inputData.length);
+      for (let i = 0; i < inputData.length; i++) {
+        const s = Math.max(-1, Math.min(1, inputData[i]));
+        int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      const bytes = new Uint8Array(int16.buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      ws.send(JSON.stringify({
+        type: 'captured',
+        pcm: btoa(binary),
+        sampleRate: audioContext.sampleRate,
+        callId: currentCallId
+      }));
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+    console.log('Audio capture connected');
+  } catch (e) {
+    console.error('Capture error:', e);
+  }
 }
 
-async function playAudio(pcmBase64, sampleRate, channels) {
+function playAudio(pcmBase64, sampleRate, channels) {
   if (!audioContext) return;
-  if (audioContext.state === 'suspended') await audioContext.resume();
 
   const binary = atob(pcmBase64);
   const bytes = new Uint8Array(binary.length);
@@ -136,31 +166,24 @@ async function playAudio(pcmBase64, sampleRate, channels) {
     float32[i] = int16[i] / 32768.0;
   }
 
-  console.log('Playing', float32.length, 'samples at', sampleRate, 'Hz');
-
+  console.log('Playing', float32.length, 'samples');
   const frameSize = 960;
   let offset = 0;
 
-  return new Promise((resolve) => {
-    function playNext() {
-      if (offset >= float32.length || !pc) {
-        console.log('Playback done');
-        resolve();
-        return;
-      }
-      const end = Math.min(offset + frameSize, float32.length);
-      const chunk = float32.slice(offset, end);
-      const buffer = audioContext.createBuffer(1, chunk.length, sampleRate || 48000);
-      buffer.getChannelData(0).set(chunk);
-      const src = audioContext.createBufferSource();
-      src.buffer = buffer;
-      src.connect(destination);
-      src.onended = playNext;
-      src.start();
-      offset = end;
-    }
-    playNext();
-  });
+  function playNext() {
+    if (offset >= float32.length || !pc) return;
+    const end = Math.min(offset + frameSize, float32.length);
+    const chunk = float32.slice(offset, end);
+    const buffer = audioContext.createBuffer(1, chunk.length, sampleRate || 48000);
+    buffer.getChannelData(0).set(chunk);
+    const src = audioContext.createBufferSource();
+    src.buffer = buffer;
+    src.connect(destination);
+    src.onended = playNext;
+    src.start();
+    offset = end;
+  }
+  playNext();
 }
 
 connect();
