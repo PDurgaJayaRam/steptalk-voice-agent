@@ -50,7 +50,7 @@ async function generateLLMResponse(userInput) {
         'Authorization': `Bearer ${GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'openai/gpt-oss-120b',
+        model: 'llama-3.3-70b-versatile',
         messages,
         stream: false,
         max_tokens: 100,
@@ -94,13 +94,20 @@ async function* generateLLMResponseStream(userInput) {
         'Authorization': `Bearer ${GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'openai/gpt-oss-120b',
+        model: 'llama-3.3-70b-versatile',
         messages,
         stream: true,
         max_tokens: 100,
         temperature: 0.5
       })
     });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`[LLM] Groq API error ${response.status}: ${errText}`);
+      yield "Sorry, I encountered an error. Could you repeat that?";
+      return;
+    }
 
     const reader = response.body;
     const decoder = new TextDecoder();
@@ -125,7 +132,7 @@ async function* generateLLMResponseStream(userInput) {
     }
   } catch (error) {
     console.error('LLM Stream Error:', error.message);
-    yield "I'm sorry, I didn't catch that. Could you please repeat?";
+    yield "Sorry, I encountered an error. Could you repeat that?";
   }
 }
 
