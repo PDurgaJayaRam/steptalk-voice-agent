@@ -9,6 +9,7 @@ let pc;
 let audioContext;
 let destination;
 let currentCallId = null;
+let toneNode = null;
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -26,7 +27,7 @@ function connect() {
     }
   };
   ws.onclose = () => {
-    console.log('Bridge disconnected, reconnecting...');
+    console.log('Bridge disconnected');
     setTimeout(connect, 1000);
   };
 }
@@ -39,11 +40,34 @@ async function handleMessage(msg) {
     playAudio(msg.pcm, msg.sampleRate, msg.channels);
   } else if (msg.type === 'stop') {
     if (pc) { pc.close(); pc = null; }
+    stopTone();
+  }
+}
+
+function startTone() {
+  if (!audioContext || toneNode) return;
+  const osc = audioContext.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.value = 300;
+  const gain = audioContext.createGain();
+  gain.gain.value = 0.05;
+  osc.connect(gain);
+  gain.connect(destination);
+  osc.start();
+  toneNode = { osc, gain };
+  console.log('Tone started (300Hz, very quiet)');
+}
+
+function stopTone() {
+  if (toneNode) {
+    try { toneNode.osc.stop(); } catch (e) {}
+    toneNode = null;
   }
 }
 
 async function setupPeerConnection(offerSdp, callId) {
   if (pc) { pc.close(); pc = null; }
+  stopTone();
   currentCallId = callId;
 
   if (!audioContext || audioContext.state === 'closed') {
@@ -53,6 +77,8 @@ async function setupPeerConnection(offerSdp, callId) {
     await audioContext.resume();
   }
   destination = audioContext.createMediaStreamDestination();
+
+  startTone();
 
   pc = new RTCPeerConnection({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -64,30 +90,22 @@ async function setupPeerConnection(offerSdp, callId) {
   pc.ontrack = (event) => {
     console.log('ontrack fired, kind:', event.track.kind, 'streams:', event.streams.length);
     const stream = event.streams[0];
-    if (!stream) {
-      console.log('No stream in ontrack event');
-      return;
-    }
+    if (!stream) return;
     captureRemoteAudio(stream);
   };
 
   pc.oniceconnectionstatechange = () => {
     const state = pc.iceConnectionState;
-    console.log('ICE state:', state);
+    console.log('ICE:', state);
     ws.send(JSON.stringify({ type: 'ice', state, callId }));
   };
 
   pc.onconnectionstatechange = () => {
     const state = pc.connectionState;
-    console.log('Connection state:', state);
+    console.log('Connection:', state);
     ws.send(JSON.stringify({ type: 'connection', state, callId }));
   };
 
-  pc.onicegatheringstatechange = () => {
-    console.log('ICE gathering:', pc.iceGatheringState);
-  };
-
-  console.log('Setting remote description...');
   await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: offerSdp }));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
@@ -98,30 +116,31 @@ async function setupPeerConnection(offerSdp, callId) {
 
 function captureRemoteAudio(stream) {
   if (!stream) return;
-  console.log('Audio tracks in stream:', stream.getTracks().length);
+  console.log('Tracks in stream:', stream.getTracks().length);
+  const remoteTrack = stream.getAudioTracks()[0];
+  if (remoteTrack) {
+    console.log('Remote track: enabled=' + remoteTrack.enabled + ' muted=' + remoteTrack.muted + ' ready=' + remoteTrack.readyState);
+  }
 
   try {
     const source = audioContext.createMediaStreamSource(stream);
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 2048;
-
-    source.connect(analyser);
-
-    console.log('Starting audio capture via ScriptProcessor');
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
-    let captureCount = 0;
+    let count = 0;
 
     processor.onaudioprocess = (e) => {
       const inputData = e.inputBuffer.getChannelData(0);
       let sum = 0;
+      let max = 0;
       for (let i = 0; i < inputData.length; i++) {
-        sum += Math.abs(inputData[i]);
+        const v = Math.abs(inputData[i]);
+        sum += v;
+        if (v > max) max = v;
       }
       const avg = sum / inputData.length;
 
-      captureCount++;
-      if (captureCount <= 3 || captureCount % 50 === 0) {
-        console.log('Capture #' + captureCount + ' avg=' + avg.toFixed(4) + ' len=' + inputData.length);
+      count++;
+      if (count <= 5 || count % 100 === 0) {
+        console.log('Capture #' + count + ' avg=' + avg.toFixed(6) + ' max=' + max.toFixed(6));
       }
 
       if (avg < 0.001) return;
@@ -154,6 +173,8 @@ function captureRemoteAudio(stream) {
 
 function playAudio(pcmBase64, sampleRate, channels) {
   if (!audioContext) return;
+  stopTone();
+  if (audioContext.state === 'suspended') audioContext.resume();
 
   const binary = atob(pcmBase64);
   const bytes = new Uint8Array(binary.length);
@@ -171,7 +192,10 @@ function playAudio(pcmBase64, sampleRate, channels) {
   let offset = 0;
 
   function playNext() {
-    if (offset >= float32.length || !pc) return;
+    if (offset >= float32.length || !pc) {
+      startTone();
+      return;
+    }
     const end = Math.min(offset + frameSize, float32.length);
     const chunk = float32.slice(offset, end);
     const buffer = audioContext.createBuffer(1, chunk.length, sampleRate || 48000);
