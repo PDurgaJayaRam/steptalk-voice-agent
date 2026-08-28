@@ -5,6 +5,7 @@ const { Readable } = require('stream');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
+const GROQ_LLM_MODEL = 'llama-3.3-70b-versatile';
 
 async function transcribeAudio(wavBuffer) {
   try {
@@ -97,8 +98,29 @@ async function generateLLMResponse(userInput) {
 
     throw new Error('No response from NVIDIA NIM');
   } catch (error) {
-    console.error('LLM Error:', error.message);
-    return "I'm sorry, I didn't catch that. Could you please repeat?";
+    console.error('NVIDIA LLM failed, trying Groq:', error.message);
+    try {
+      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${GROQ_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: GROQ_LLM_MODEL,
+          messages,
+          max_tokens: 256,
+          temperature: 0.3
+        })
+      });
+      const groqData = await groqRes.json();
+      if (groqData.choices && groqData.choices.length > 0) {
+        return groqData.choices[0].message.content.trim();
+      }
+    } catch (groqErr) {
+      console.error('Groq LLM Error:', groqErr.message);
+    }
+    return "I'm sorry, I'm having trouble connecting. Could you please repeat?";
   }
 }
 
