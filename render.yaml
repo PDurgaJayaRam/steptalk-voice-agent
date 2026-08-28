@@ -1,0 +1,14 @@
+{
+  "services": [
+    {
+      "type": "web",
+      "name": "steptalk",
+      "runtime": "node",
+      "buildCommand": "cd backend && npm install && npx @puppeteer/browsers install chrome@stable --path ./chromium",
+      "startCommand": "cd backend && node server.js",
+      "envVars": [
+        { "key": "NODE_VERSION", "value": "22" }
+      ]
+    }
+  ]
+}

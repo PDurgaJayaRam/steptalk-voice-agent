@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "postinstall": "npx puppeteer browsers install chrome"
+    "postinstall": "npx @puppeteer/browsers install chrome@stable --path ./chromium"
   },
   "dependencies": {
     "@roamhq/wrtc": "^0.8.0",
@@ -17,7 +17,7 @@
     "lamejs": "^1.2.1",
     "msedge-tts": "^2.0.7",
     "node-fetch": "^2.7.0",
-    "puppeteer": "^24.0.0",
+    "puppeteer-core": "^24.0.0",
     "ws": "^8.18.0"
   }
 }

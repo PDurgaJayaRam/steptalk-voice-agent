@@ -4,8 +4,35 @@ const path = require('path');
 const http = require('http');
 const axios = require('axios');
 const WebSocket = require('ws');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const fs = require('fs');
 const { generateLLMResponse, synthesizeSpeech, transcribeAudio } = require('./ai');
+
+function findChrome() {
+  const searchPaths = [
+    path.join(__dirname, 'chromium'),
+    process.env.PUPPETEER_CACHE_DIR,
+    '/opt/render/.cache/puppeteer'
+  ].filter(Boolean);
+
+  for (const baseDir of searchPaths) {
+    try {
+      const chromeDir = path.join(baseDir, 'chrome');
+      if (!fs.existsSync(chromeDir)) continue;
+      const versions = fs.readdirSync(chromeDir);
+      for (const ver of versions) {
+        for (const sub of ['chrome-linux64', 'chrome-win64']) {
+          for (const bin of ['chrome', 'chrome.exe']) {
+            const p = path.join(chromeDir, ver, sub, bin);
+            if (fs.existsSync(p)) { console.log(`Found Chrome: ${p}`); return p; }
+          }
+        }
+      }
+    } catch (e) {}
+  }
+  console.log('Chrome not found in any search path');
+  return null;
+}
 
 const app = express();
 app.use(express.json());
@@ -24,7 +51,6 @@ const wss = new WebSocket.Server({ server, path: '/bridge' });
 let bridgeWs = null;
 let browser = null;
 let bridgePage = null;
-let pendingAnswer = null;
 let pendingAnswerResolve = null;
 
 wss.on('connection', (ws) => {
@@ -38,7 +64,6 @@ wss.on('connection', (ws) => {
         console.log('Bridge page ready');
       } else if (msg.type === 'answer') {
         console.log(`Bridge answer: ${msg.sdp.length} bytes`);
-        pendingAnswer = msg.sdp;
         if (pendingAnswerResolve) {
           pendingAnswerResolve(msg.sdp);
           pendingAnswerResolve = null;
@@ -95,11 +120,17 @@ async function handleCapturedAudio(msg) {
 }
 
 async function launchBridge() {
-  if (browser && bridgePage) return;
+  if (browser && bridgePage && bridgeWs) return;
 
-  console.log('Launching Puppeteer...');
+  const chromePath = findChrome();
+  if (!chromePath) {
+    throw new Error('Chrome not found. Ensure @puppeteer/browsers install ran during build.');
+  }
+
+  console.log(`Launching Puppeteer with ${chromePath}...`);
   browser = await puppeteer.launch({
     headless: 'new',
+    executablePath: chromePath,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -185,30 +216,20 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     activeCalls.set(callId, callState);
 
     console.log('Sending offer to bridge...');
-    pendingAnswer = null;
-    pendingAnswerResolve = null;
-
-    const answerPromise = new Promise((resolve) => {
+    const answerPromise = new Promise((resolve, reject) => {
       pendingAnswerResolve = resolve;
+      setTimeout(() => { if (pendingAnswerResolve) { pendingAnswerResolve = null; reject(new Error('Bridge timeout')); } }, 10000);
     });
 
-    bridgeWs.send(JSON.stringify({
-      type: 'offer',
-      sdp: session.sdp,
-      callId
-    }));
+    bridgeWs.send(JSON.stringify({ type: 'offer', sdp: session.sdp, callId }));
 
-    const answerSdp = await Promise.race([
-      answerPromise,
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Bridge timeout')), 10000))
-    ]);
+    const answerSdp = await answerPromise;
 
     let finalSdp = answerSdp.replace(/a=setup:actpass/g, 'a=setup:active');
     if (finalSdp.includes('a=inactive')) {
       finalSdp = finalSdp.replace(/a=inactive/g, 'a=sendrecv');
     }
     console.log(`Answer: ${finalSdp.length} bytes`);
-    console.log('SDP audio lines:', finalSdp.split('\n').filter(l => l.startsWith('m=') || l.startsWith('a=send') || l.startsWith('a=recv') || l.startsWith('a=inactive')).join(' | '));
 
     const preOk = await sendAction(callId, 'pre_accept', finalSdp);
     if (!preOk) { cleanupCall(callId); return; }
@@ -392,16 +413,16 @@ function cleanupCall(callId) {
   }
 }
 
+app.get('/bridge', (req, res) => {
+  res.sendFile(path.join(__dirname, 'bridge.html'));
+});
+
 app.get('/api/status', (req, res) => {
   res.json({ status: 'running', activeCalls: activeCalls.size, bridge: !!bridgeWs });
 });
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
-});
-
-app.get('/bridge', (req, res) => {
-  res.sendFile(path.join(__dirname, 'bridge.html'));
 });
 
 server.listen(PORT, async () => {
