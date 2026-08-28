@@ -4,8 +4,6 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
-const GROQ_LLM_MODEL = 'llama-3.3-70b-versatile';
 
 async function transcribeAudio(wavBuffer) {
   try {
@@ -45,17 +43,16 @@ async function generateLLMResponse(userInput) {
   ];
 
   try {
-    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${NVIDIA_API_KEY}`
+        'Authorization': `Bearer ${GROQ_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+        model: 'qwen/qwen3.8-27b',
         messages,
-        stream: false,
-        max_tokens: 512,
+        max_tokens: 256,
         temperature: 0.3
       })
     });
@@ -63,64 +60,21 @@ async function generateLLMResponse(userInput) {
     const data = await response.json();
 
     if (data.error) {
-      console.error('NVIDIA LLM error:', JSON.stringify(data.error));
+      console.error('Groq LLM error:', JSON.stringify(data.error));
       throw new Error(data.error.message);
     }
 
     if (data.choices && data.choices.length > 0) {
       let content = data.choices[0].message.content || '';
-      const quotedMatch = content.match(/"([^"]{5,})"\s*$/);
-      if (quotedMatch) return quotedMatch[1].trim();
-
-      const lines = content.split('\n').filter(l => l.trim());
-      for (let i = lines.length - 1; i >= Math.max(0, lines.length - 5); i--) {
-        const line = lines[i].replace(/^["']|["']$/g, '').trim();
-        if (line.length > 5
-          && !line.startsWith('**')
-          && !line.match(/^\d[\.\)]/)
-          && !line.startsWith('-')
-          && !line.includes('StepTalk')
-          && !line.includes('system')
-          && !line.includes('thinking')
-          && !line.includes('Analyze')
-          && !line.includes('Response')
-          && !line.includes('Directly')
-          && !line.includes('Draft')
-          && !line.includes('Check')
-          && !line.includes('Constraints')
-          && !line.includes('Identify')
-          && !line.includes('Determine')) {
-          return line;
-        }
-      }
-      return content.slice(-100).trim();
+      content = content.replace(/<think>[\s\S]*?<\/thought>/g, '').trim();
+      if (content.length > 200) content = content.slice(0, 200);
+      if (content.length > 0) return content;
     }
 
-    throw new Error('No response from NVIDIA NIM');
+    throw new Error('No response from Groq');
   } catch (error) {
-    console.error('NVIDIA LLM failed, trying Groq:', error.message);
-    try {
-      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${GROQ_API_KEY}`
-        },
-        body: JSON.stringify({
-          model: GROQ_LLM_MODEL,
-          messages,
-          max_tokens: 256,
-          temperature: 0.3
-        })
-      });
-      const groqData = await groqRes.json();
-      if (groqData.choices && groqData.choices.length > 0) {
-        return groqData.choices[0].message.content.trim();
-      }
-    } catch (groqErr) {
-      console.error('Groq LLM Error:', groqErr.message);
-    }
-    return "I'm sorry, I'm having trouble connecting. Could you please repeat?";
+    console.error('LLM Error:', error.message);
+    return "I'm sorry, I didn't catch that. Could you please repeat?";
   }
 }
 
