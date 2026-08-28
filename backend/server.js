@@ -21,8 +21,8 @@ const activeCalls = new Map();
 const VAD = {
   SPEECH_THRESHOLD: 80,
   SILENCE_THRESHOLD: 30,
-  MIN_SPEECH_FRAMES: 15,
-  SILENCE_AFTER_SPEECH_FRAMES: 50,
+  MIN_SPEECH_FRAMES: 20,
+  SILENCE_AFTER_SPEECH_FRAMES: 70,
   BARGE_IN_THRESHOLD: 200,
 };
 
@@ -378,7 +378,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     }
 
     const remaining = sentenceBuffer.trim();
-    if (remaining.length > 3) {
+    if (remaining.length > 0) {
       sentenceCount++;
       const ttsStart = Date.now();
       const ttsBuffer = await synthesizeSpeech(remaining);
