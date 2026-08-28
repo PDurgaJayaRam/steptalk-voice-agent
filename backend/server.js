@@ -232,15 +232,18 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     const answerSdp = await answerPromise;
 
-    let finalSdp = answerSdp.replace(/a=setup:actpass/g, 'a=setup:active');
+    let finalSdp = answerSdp;
+    finalSdp = finalSdp.replace(/a=fingerprint:sha-/g, 'a=fingerprint:SHA-');
+    finalSdp = finalSdp.replace(/a=setup:actpass/g, 'a=setup:active');
     if (finalSdp.includes('a=inactive')) {
       finalSdp = finalSdp.replace(/a=inactive/g, 'a=sendrecv');
     }
     finalSdp = finalSdp.replace(/a=ice-options:trickle\r?\n/g, '');
-    finalSdp = finalSdp.split('\n').filter(l => {
+    const lines = finalSdp.split(/\r?\n/).filter(l => {
       if (l.startsWith('a=candidate:') && l.includes('.local')) return false;
-      return true;
-    }).join('\n');
+      return l.length > 0;
+    });
+    finalSdp = lines.join('\r\n') + '\r\n';
     console.log(`Answer: ${finalSdp.length} bytes`);
     console.log('=== ANSWER SDP ===');
     console.log(finalSdp);
