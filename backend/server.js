@@ -145,14 +145,14 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
         clearInterval(callState.silenceInterval);
         return;
       }
-      const silence = new Int16Array(960);
+      const silence = new Int16Array(480);
       audioSource.onData({
-        type: 'audio',
-        timestamp: Date.now(),
         samples: silence,
-        sampleRate: 48000
+        sampleRate: 48000,
+        bitsPerSample: 16,
+        channelCount: 1
       });
-    }, 20);
+    }, 10);
 
     console.log(`[${callId}] Call active! Silence streaming started.`);
 
@@ -330,34 +330,34 @@ function playAudioToCall(callId, wavBuffer) {
     }
 
     const int16 = new Int16Array(playPcm.buffer, playPcm.byteOffset, playPcm.byteLength / 2);
-    const frameSize = 960;
+    const frameSize = 480;
     let offset = 0;
 
     const playNext = () => {
       if (offset >= int16.length || !callState.pc) {
         if (callState.silenceInterval) {
-          const silence = new Int16Array(960);
+      const silence = new Int16Array(480);
           callState.audioSource.onData({
-            type: 'audio',
-            timestamp: Date.now(),
             samples: silence,
-            sampleRate: 48000
+            sampleRate: 48000,
+            bitsPerSample: 16,
+            channelCount: 1
           });
         }
         return;
       }
       const end = Math.min(offset + frameSize, int16.length);
       const frame = int16.slice(offset, end);
-      const padded = new Int16Array(960);
+      const padded = new Int16Array(480);
       padded.set(frame);
       callState.audioSource.onData({
-        type: 'audio',
-        timestamp: Date.now(),
         samples: padded,
-        sampleRate: 48000
+        sampleRate: 48000,
+        bitsPerSample: 16,
+        channelCount: 1
       });
       offset = end;
-      setTimeout(playNext, 20);
+      setTimeout(playNext, 10);
     };
     playNext();
 
