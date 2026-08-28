@@ -209,6 +209,12 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
   try {
     await launchBridge();
 
+    console.log('=== WHATSAPP SDP OFFER ===');
+    console.log(session.sdp.split('\n').filter(l =>
+      l.startsWith('m=') || l.startsWith('a=') || l.startsWith('c=') || l.startsWith('o=')
+    ).join('\n'));
+    console.log('=== END OFFER ===');
+
     const callState = {
       callId, callerName, callerNumber,
       startTime: Date.now(),
@@ -231,6 +237,10 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
       finalSdp = finalSdp.replace(/a=inactive/g, 'a=sendrecv');
     }
     console.log(`Answer: ${finalSdp.length} bytes`);
+    console.log('=== ANSWER SDP ===');
+    console.log(finalSdp);
+    console.log('=== OFFER SDP ===');
+    console.log(session.sdp);
 
     const preOk = await sendAction(callId, 'pre_accept', finalSdp);
     if (!preOk) { cleanupCall(callId); return; }
