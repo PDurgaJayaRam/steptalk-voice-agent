@@ -53,7 +53,7 @@ async function generateLLMResponse(userInput) {
         model: 'openai/gpt-oss-120b',
         messages,
         stream: false,
-        max_tokens: 50,
+        max_tokens: 100,
         temperature: 0.5
       })
     });
@@ -97,7 +97,7 @@ async function* generateLLMResponseStream(userInput) {
         model: 'openai/gpt-oss-120b',
         messages,
         stream: true,
-        max_tokens: 50,
+        max_tokens: 100,
         temperature: 0.5
       })
     });

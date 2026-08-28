@@ -22,7 +22,7 @@ const VAD = {
   SPEECH_THRESHOLD: 80,
   SILENCE_THRESHOLD: 30,
   MIN_SPEECH_FRAMES: 15,
-  SILENCE_AFTER_SPEECH_FRAMES: 30,
+  SILENCE_AFTER_SPEECH_FRAMES: 50,
   BARGE_IN_THRESHOLD: 200,
 };
 
@@ -363,7 +363,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         const sentence = sentenceBuffer.slice(0, sentenceEndIndex).trim();
         sentenceBuffer = sentenceBuffer.slice(sentenceEndIndex);
 
-        if (sentence.length > 5) {
+        if (sentence.length > 3) {
           sentenceCount++;
           const ttsStart = Date.now();
           const ttsBuffer = await synthesizeSpeech(sentence);
@@ -377,10 +377,11 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       }
     }
 
-    if (sentenceBuffer.trim().length > 5) {
+    const remaining = sentenceBuffer.trim();
+    if (remaining.length > 3) {
       sentenceCount++;
       const ttsStart = Date.now();
-      const ttsBuffer = await synthesizeSpeech(sentenceBuffer.trim());
+      const ttsBuffer = await synthesizeSpeech(remaining);
       const ttsMs = Date.now() - ttsStart;
 
       if (ttsBuffer) {
