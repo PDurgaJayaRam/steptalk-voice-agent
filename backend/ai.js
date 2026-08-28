@@ -4,6 +4,7 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
 async function transcribeAudio(wavBuffer) {
   try {
@@ -43,15 +44,16 @@ async function generateLLMResponse(userInput) {
   ];
 
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${GROQ_API_KEY}`
+        'Authorization': `Bearer ${NVIDIA_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'qwen/qwen3.8-27b',
+        model: 'nvidia/nemotron-3-nano-30b-a3b',
         messages,
+        stream: false,
         max_tokens: 256,
         temperature: 0.3
       })
@@ -60,20 +62,42 @@ async function generateLLMResponse(userInput) {
     const data = await response.json();
 
     if (data.error) {
-      console.error('Groq LLM error:', JSON.stringify(data.error));
+      console.error('NVIDIA LLM error:', JSON.stringify(data.error));
       throw new Error(data.error.message);
     }
 
     if (data.choices && data.choices.length > 0) {
       let content = data.choices[0].message.content || '';
       content = content.replace(/<think>[\s\S]*?<\/thought>/g, '').trim();
-      if (content.length > 200) content = content.slice(0, 200);
       if (content.length > 0) return content;
     }
 
-    throw new Error('No response from Groq');
+    throw new Error('No response from NVIDIA NIM');
   } catch (error) {
-    console.error('LLM Error:', error.message);
+    console.error('NVIDIA failed, trying Groq:', error.message);
+    try {
+      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${GROQ_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'qwen/qwen3.8-27b',
+          messages,
+          max_tokens: 256,
+          temperature: 0.3
+        })
+      });
+      const groqData = await groqRes.json();
+      if (groqData.choices && groqData.choices.length > 0) {
+        let content = groqData.choices[0].message.content || '';
+        content = content.replace(/<think>[\s\S]*?<\/thought>/g, '').trim();
+        if (content.length > 0) return content;
+      }
+    } catch (groqErr) {
+      console.error('Groq LLM Error:', groqErr.message);
+    }
     return "I'm sorry, I didn't catch that. Could you please repeat?";
   }
 }
