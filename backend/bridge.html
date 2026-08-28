@@ -82,12 +82,8 @@ async function setupPeerConnection(offerSdp, callId) {
 
   pc = new RTCPeerConnection({
     iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
-    ],
-    iceTransportPolicy: 'relay'
+      { urls: 'stun:stun.l.google.com:19302' }
+    ]
   });
 
   const audioTrack = destination.stream.getAudioTracks()[0];
@@ -116,8 +112,23 @@ async function setupPeerConnection(offerSdp, callId) {
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
-  console.log('Sending answer');
-  ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp, callId }));
+  console.log('Waiting for ICE gathering to complete...');
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') { console.log('ICE already complete'); resolve(); return; }
+    const checkComplete = () => {
+      if (pc.iceGatheringState === 'complete') {
+        console.log('ICE gathering complete');
+        resolve();
+      }
+    };
+    pc.onicegatheringstatechange = checkComplete;
+    setTimeout(() => { console.log('ICE gathering timeout, using what we have'); resolve(); }, 5000);
+  });
+
+  const finalSdp = pc.localDescription.sdp;
+  const candidateCount = (finalSdp.match(/a=candidate/g) || []).length;
+  console.log('Answer has', candidateCount, 'candidates');
+  ws.send(JSON.stringify({ type: 'answer', sdp: finalSdp, callId }));
 }
 
 function captureRemoteAudio(stream) {
