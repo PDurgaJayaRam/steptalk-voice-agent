@@ -1,4 +1,4 @@
-require('dotenv').config();
+﻿require('dotenv').config();
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const FormData = require('form-data');
 const { Readable } = require('stream');
@@ -34,6 +34,10 @@ async function transcribeAudio(wavBuffer) {
   }
 }
 
+function stripThinking(text) {
+  return text.replace(/<\/?think(ing)?>/g, '').trim();
+}
+
 async function generateLLMResponse(userInput) {
   const messages = [
     {
@@ -67,7 +71,7 @@ async function generateLLMResponse(userInput) {
 
     if (data.choices && data.choices.length > 0) {
       let content = data.choices[0].message.content || '';
-      content = content.replace(/<think>[\s\S]*?<\/thought>/g, '').trim();
+      content = stripThinking(content);
       if (content.length > 0) return content;
     }
 
@@ -112,12 +116,14 @@ async function* generateLLMResponseStream(userInput) {
 
     const reader = response.body;
     const decoder = new TextDecoder();
-    let buffer = '';
+    let sseBuffer = '';
+    let thinkBuffer = '';
+    let inThink = false;
 
     for await (const chunk of reader) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
+      sseBuffer += decoder.decode(chunk, { stream: true });
+      const lines = sseBuffer.split('\n');
+      sseBuffer = lines.pop() || '';
 
       for (const line of lines) {
         if (line.startsWith('data: ')) {
@@ -126,7 +132,20 @@ async function* generateLLMResponseStream(userInput) {
           try {
             const parsed = JSON.parse(data);
             const token = parsed.choices?.[0]?.delta?.content;
-            if (token) yield token;
+            if (!token) continue;
+
+            if (token.includes('<think')) inThink = true;
+
+            if (inThink) {
+              thinkBuffer += token;
+              if (thinkBuffer.includes('</think>')) {
+                inThink = false;
+                thinkBuffer = '';
+              }
+              continue;
+            }
+
+            yield token;
           } catch (e) {}
         }
       }
