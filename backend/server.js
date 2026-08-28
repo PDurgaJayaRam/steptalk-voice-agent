@@ -262,7 +262,7 @@ async function handleCapturedAudio(callId, data) {
       return;
     }
 
-    if (callState.isProcessing) return;
+    if (callState.isPlaying || callState.isProcessing) return;
 
     switch (callState.vadState) {
       case 'IDLE':
@@ -350,8 +350,8 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     let sentenceCount = 0;
 
     for await (const token of generateLLMResponseStream(text)) {
-      if (callState.vadState === 'SPEAKING' || (!callState.pc || callState.pc.connectionState === 'closed')) {
-        console.log(`[${callId}] LLM streaming interrupted`);
+      if (!callState.pc || callState.pc.connectionState === 'closed') {
+        console.log(`[${callId}] LLM streaming interrupted (connection closed)`);
         break;
       }
 
@@ -369,7 +369,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
           const ttsBuffer = await synthesizeSpeech(sentence);
           const ttsMs = Date.now() - ttsStart;
 
-          if (ttsBuffer && !callState.vadState === 'SPEAKING') {
+          if (ttsBuffer) {
             console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
             playAudioToCall(callId, ttsBuffer);
           }
@@ -383,7 +383,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       const ttsBuffer = await synthesizeSpeech(sentenceBuffer.trim());
       const ttsMs = Date.now() - ttsStart;
 
-      if (ttsBuffer && callState.vadState !== 'SPEAKING') {
+      if (ttsBuffer) {
         console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
         playAudioToCall(callId, ttsBuffer);
       }
