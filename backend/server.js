@@ -71,6 +71,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
   try {
     const wrtc = require('@roamhq/wrtc');
+    const { RTCAudioSource, RTCAudioSink } = wrtc.nonstandard;
 
     const callState = {
       callId, callerName, callerNumber,
@@ -87,7 +88,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     });
     callState.pc = pc;
 
-    const audioSource = new wrtc.RTCAudioSource();
+    const audioSource = new RTCAudioSource();
     callState.audioSource = audioSource;
     const audioTrack = audioSource.createTrack();
     pc.addTrack(audioTrack);
@@ -97,7 +98,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     pc.ontrack = (event) => {
       console.log(`[${callId}] ontrack: kind=${event.track.kind} enabled=${event.track.enabled} muted=${event.track.muted} readyState=${event.track.readyState}`);
       if (event.track.kind === 'audio') {
-        audioSink = new wrtc.RTCAudioSink(event.track);
+        audioSink = new RTCAudioSink(event.track);
         callState.audioSink = audioSink;
         audioSink.ondata = (data) => {
           handleCapturedAudio(callId, data);
