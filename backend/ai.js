@@ -4,6 +4,7 @@ const FormData = require('form-data');
 const { Readable } = require('stream');
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
 async function transcribeAudio(wavBuffer) {
   try {
@@ -43,14 +44,14 @@ async function generateLLMResponse(userInput) {
   ];
 
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${GROQ_API_KEY}`
+        'Authorization': `Bearer ${NVIDIA_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: 'stepfun-ai/step-3.7-flash',
         messages,
         stream: false,
         max_tokens: 100,
@@ -61,7 +62,7 @@ async function generateLLMResponse(userInput) {
     const data = await response.json();
 
     if (data.error) {
-      throw new Error(data.error.message);
+      throw new Error(data.error.message || JSON.stringify(data.error));
     }
 
     if (data.choices && data.choices.length > 0) {
@@ -87,14 +88,14 @@ async function* generateLLMResponseStream(userInput) {
   ];
 
   try {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${GROQ_API_KEY}`
+        'Authorization': `Bearer ${NVIDIA_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile',
+        model: 'stepfun-ai/step-3.7-flash',
         messages,
         stream: true,
         max_tokens: 100,
@@ -104,7 +105,7 @@ async function* generateLLMResponseStream(userInput) {
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`[LLM] Groq API error ${response.status}: ${errText}`);
+      console.error(`[LLM] NVIDIA NIM error ${response.status}: ${errText}`);
       yield "Sorry, I encountered an error. Could you repeat that?";
       return;
     }
