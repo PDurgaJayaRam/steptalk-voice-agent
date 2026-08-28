@@ -37,7 +37,7 @@ async function generateLLMResponse(userInput) {
   const messages = [
     {
       role: 'system',
-      content: 'You are StepTalk AI, a professional and friendly voice assistant. Respond in 1-2 short sentences maximum. Speak naturally like a human on a phone call. Never use bullet points, lists, or markdown. Never show thinking tags. Keep responses under 30 words. Be concise, warm, and helpful.'
+      content: 'You are StepTalk AI, a professional and friendly voice assistant. Respond in 1 short sentence maximum, under 15 words. Speak naturally like a human on a phone call. Never use bullet points, lists, markdown, or thinking tags. Be concise, warm, and helpful.'
     },
     { role: 'user', content: userInput }
   ];
@@ -53,7 +53,7 @@ async function generateLLMResponse(userInput) {
         model: 'openai/gpt-oss-120b',
         messages,
         stream: false,
-        max_tokens: 100,
+        max_tokens: 50,
         temperature: 0.5
       })
     });
@@ -81,7 +81,7 @@ async function* generateLLMResponseStream(userInput) {
   const messages = [
     {
       role: 'system',
-      content: 'You are StepTalk AI, a professional and friendly voice assistant. Respond in 1-2 short sentences maximum. Speak naturally like a human on a phone call. Never use bullet points, lists, or markdown. Never show thinking tags. Keep responses under 30 words. Be concise, warm, and helpful.'
+      content: 'You are StepTalk AI, a professional and friendly voice assistant. Respond in 1 short sentence maximum, under 15 words. Speak naturally like a human on a phone call. Never use bullet points, lists, markdown, or thinking tags. Be concise, warm, and helpful.'
     },
     { role: 'user', content: userInput }
   ];
@@ -97,7 +97,7 @@ async function* generateLLMResponseStream(userInput) {
         model: 'openai/gpt-oss-120b',
         messages,
         stream: true,
-        max_tokens: 100,
+        max_tokens: 50,
         temperature: 0.5
       })
     });
