@@ -80,6 +80,9 @@ async function generateLLMResponse(userInput) {
 
 async function synthesizeSpeech(text) {
   try {
+    const voiceId = process.env.FISH_VOICE_ID;
+    console.log(`[TTS] Fish Audio: voice=${voiceId} text="${text.substring(0, 80)}..."`);
+
     const response = await fetch('https://api.fish.audio/v1/tts', {
       method: 'POST',
       headers: {
@@ -89,23 +92,29 @@ async function synthesizeSpeech(text) {
       },
       body: JSON.stringify({
         text,
-        reference_id: process.env.FISH_VOICE_ID,
+        reference_id: voiceId,
         format: 'wav',
-        latency: 'normal'
+        sample_rate: 44100,
+        latency: 'normal',
+        temperature: 0.0,
+        top_p: 1.0,
+        normalize: true,
+        prosody: { speed: 1, volume: 0, normalize_loudness: true }
       })
     });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error(`Fish Audio error ${response.status}: ${errText}`);
+      console.error(`[TTS] Fish Audio error ${response.status}: ${errText}`);
       throw new Error(`Fish Audio API error: ${response.status}`);
     }
 
+    const contentType = response.headers.get('content-type');
     const buffer = Buffer.from(await response.arrayBuffer());
-    console.log(`[TTS] Fish Audio s2.1-pro-free returned ${buffer.length} bytes`);
+    console.log(`[TTS] Fish Audio OK: ${buffer.length} bytes, content-type=${contentType}`);
     return buffer;
   } catch (error) {
-    console.error('TTS Error:', error.message);
+    console.error('[TTS] Error:', error.message);
     return null;
   }
 }
