@@ -8,6 +8,7 @@ let ws;
 let pc;
 let audioContext;
 let destination;
+let currentCallId = null;
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -21,7 +22,7 @@ function connect() {
       await handleMessage(msg);
     } catch (e) {
       console.error('Handle error:', e);
-      ws.send(JSON.stringify({ type: 'error', error: e.message }));
+      ws.send(JSON.stringify({ type: 'error', error: e.message, callId: currentCallId }));
     }
   };
   ws.onclose = () => {
@@ -31,6 +32,7 @@ function connect() {
 }
 
 async function handleMessage(msg) {
+  console.log('Received:', msg.type);
   if (msg.type === 'offer') {
     await setupPeerConnection(msg.sdp, msg.callId);
   } else if (msg.type === 'audio') {
@@ -38,23 +40,27 @@ async function handleMessage(msg) {
   } else if (msg.type === 'stop') {
     if (pc) { pc.close(); pc = null; }
     if (audioContext) { audioContext.close(); audioContext = null; }
-    ws.send(JSON.stringify({ type: 'stopped' }));
   }
 }
 
 async function setupPeerConnection(offerSdp, callId) {
   if (pc) { pc.close(); pc = null; }
   currentCallId = callId;
-  audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+
+  if (!audioContext || audioContext.state === 'closed') {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+  }
+  if (audioContext.state === 'suspended') {
+    await audioContext.resume();
+  }
   destination = audioContext.createMediaStreamDestination();
 
   pc = new RTCPeerConnection({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
   });
 
-  const silentStream = destination.stream;
-  const audioTrack = silentStream.getAudioTracks()[0];
-  pc.addTrack(audioTrack, silentStream);
+  const audioTrack = destination.stream.getAudioTracks()[0];
+  pc.addTrack(audioTrack, destination.stream);
 
   let audioTrackReceived = false;
 
@@ -75,14 +81,17 @@ async function setupPeerConnection(offerSdp, callId) {
     ws.send(JSON.stringify({ type: 'connection', state: pc.connectionState, callId }));
   };
 
+  console.log('Setting remote description...');
   await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: offerSdp }));
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
 
+  console.log('Sending answer');
   ws.send(JSON.stringify({ type: 'answer', sdp: answer.sdp, callId }));
 }
 
 function captureRemoteAudio(stream) {
+  if (!stream) return;
   const source = audioContext.createMediaStreamSource(stream);
   const bufferSize = 4096;
   const processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
@@ -112,10 +121,9 @@ function captureRemoteAudio(stream) {
   processor.connect(audioContext.destination);
 }
 
-let currentCallId = null;
-
 async function playAudio(pcmBase64, sampleRate, channels) {
   if (!audioContext) return;
+  if (audioContext.state === 'suspended') await audioContext.resume();
 
   const binary = atob(pcmBase64);
   const bytes = new Uint8Array(binary.length);
@@ -128,13 +136,15 @@ async function playAudio(pcmBase64, sampleRate, channels) {
     float32[i] = int16[i] / 32768.0;
   }
 
+  console.log('Playing', float32.length, 'samples at', sampleRate, 'Hz');
+
   const frameSize = 960;
   let offset = 0;
 
   return new Promise((resolve) => {
     function playNext() {
-      if (offset >= float32.length) {
-        ws.send(JSON.stringify({ type: 'playback_done', callId: currentCallId }));
+      if (offset >= float32.length || !pc) {
+        console.log('Playback done');
         resolve();
         return;
       }
