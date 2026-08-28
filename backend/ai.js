@@ -55,7 +55,7 @@ async function generateLLMResponse(userInput) {
         'Authorization': `Bearer ${NVIDIA_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'nvidia/nemotron-3-nano-30b-a3b',
+        model: 'meta/llama-3.2-11b-vision-instruct',
         messages,
         stream: false,
         max_tokens: 100,
@@ -99,7 +99,7 @@ async function* generateLLMResponseStream(userInput) {
         'Authorization': `Bearer ${NVIDIA_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'nvidia/nemotron-3-nano-30b-a3b',
+        model: 'meta/llama-3.2-11b-vision-instruct',
         messages,
         stream: true,
         max_tokens: 100,
@@ -197,3 +197,4 @@ async function synthesizeSpeech(text) {
 }
 
 module.exports = { generateLLMResponse, generateLLMResponseStream, synthesizeSpeech, transcribeAudio };
+
