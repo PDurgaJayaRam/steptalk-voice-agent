@@ -50,7 +50,7 @@ function startTone() {
   osc.type = 'sine';
   osc.frequency.value = 300;
   const gain = audioContext.createGain();
-  gain.gain.value = 0.05;
+  gain.gain.value = 0.01;
   osc.connect(gain);
   gain.connect(destination);
   osc.start();
@@ -81,7 +81,12 @@ async function setupPeerConnection(offerSdp, callId) {
   startTone();
 
   pc = new RTCPeerConnection({
-    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+    ]
   });
 
   const audioTrack = destination.stream.getAudioTracks()[0];
