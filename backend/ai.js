@@ -85,7 +85,7 @@ async function synthesizeSpeech(text) {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.FISH_API_KEY}`,
-        'model': 's2-pro'
+        'model': 's2.1-pro-free'
       },
       body: JSON.stringify({
         text,
@@ -102,7 +102,7 @@ async function synthesizeSpeech(text) {
     }
 
     const buffer = Buffer.from(await response.arrayBuffer());
-    console.log(`[TTS] Fish Audio s2-pro returned ${buffer.length} bytes`);
+    console.log(`[TTS] Fish Audio s2.1-pro-free returned ${buffer.length} bytes`);
     return buffer;
   } catch (error) {
     console.error('TTS Error:', error.message);
