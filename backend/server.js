@@ -241,7 +241,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     finalSdp = finalSdp.replace(/a=ice-options:trickle\r?\n/g, '');
     const lines = finalSdp.split(/\r?\n/).filter(l => {
       if (l.startsWith('a=candidate:') && l.includes('.local')) return false;
-      return l.length > 0;
+      return l.trim().length > 0;
     });
     finalSdp = lines.join('\r\n') + '\r\n';
     console.log(`Answer: ${finalSdp.length} bytes`);
