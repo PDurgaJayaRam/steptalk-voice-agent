@@ -3,7 +3,7 @@ const express = require('express');
 const path = require('path');
 const http = require('http');
 const axios = require('axios');
-const { generateLLMResponse, generateLLMResponseStream, synthesizeSpeech, transcribeAudio } = require('./ai');
+const { generateLLMResponse, generateLLMResponseStream, synthesizeSpeech, transcribeAudio, webSearch, needsWebSearch, getFillerText } = require('./ai');
 
 const app = express();
 app.use(express.json());
@@ -324,6 +324,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
   const callState = activeCalls.get(callId);
   if (!callState) return;
 
+  let fillerTimer = null;
   try {
     const samples = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength / 2);
     const sum = samples.reduce((acc, val) => acc + Math.abs(val), 0);
@@ -356,11 +357,46 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       return;
     }
 
+    // ---- Real-time search (free) + filler technique ----
+    let searchContext = null;
+    const shouldSearch = needsWebSearch(text);
+    if (shouldSearch) console.log(`[${callId}] Search triggered for: "${text.slice(0, 60)}"`);
+
+    // Filler: if response takes >700ms (search) or >1100ms (no search), speak a short hold phrase
+    // so caller doesn't think the call died while we fetch search / wait for LLM.
+    let fillerPlayed = false;
+    let sentenceCount = 0;
+    const fillerDelay = shouldSearch ? 700 : 1100;
+    fillerTimer = setTimeout(async () => {
+      if (fillerPlayed || sentenceCount > 0) return;
+      if (!callState.isProcessing || !activeCalls.has(callId)) return;
+      fillerPlayed = true;
+      try {
+        const fillerText = getFillerText();
+        console.log(`[${callId}] Filler triggered (${fillerDelay}ms): "${fillerText}"`);
+        const fillerBuf = await synthesizeSpeech(fillerText);
+        if (fillerBuf && activeCalls.has(callId) && sentenceCount === 0) {
+          playAudioToCall(callId, fillerBuf);
+        }
+      } catch (e) {
+        console.log(`[${callId}] Filler error: ${e.message}`);
+      }
+    }, fillerDelay);
+
+    if (shouldSearch) {
+      const searchStart = Date.now();
+      try {
+        searchContext = await webSearch(text);
+        console.log(`[${callId}] Search done (${Date.now() - searchStart}ms) ${searchContext ? searchContext.length + ' chars' : 'no results'}`);
+      } catch (e) {
+        console.log(`[${callId}] Search error: ${e.message}`);
+      }
+    }
+
     const llmStart = Date.now();
     let sentenceBuffer = '';
-    let sentenceCount = 0;
 
-    for await (const token of generateLLMResponseStream(text)) {
+    for await (const token of generateLLMResponseStream(text, searchContext)) {
       if (!callState.pc || callState.pc.connectionState === 'closed') {
         console.log(`[${callId}] LLM streaming interrupted (connection closed)`);
         break;
@@ -384,6 +420,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
 
         if (sentence.length > 3) {
           sentenceCount++;
+          if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
           const ttsStart = Date.now();
           const ttsBuffer = await synthesizeSpeech(sentence);
           const ttsMs = Date.now() - ttsStart;
@@ -399,6 +436,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     const remaining = sentenceBuffer.trim();
     if (remaining.length > 0) {
       sentenceCount++;
+      if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
       const ttsStart = Date.now();
       const ttsBuffer = await synthesizeSpeech(remaining);
       const ttsMs = Date.now() - ttsStart;
@@ -409,6 +447,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       }
     }
 
+    if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
     const llmMs = Date.now() - llmStart;
     console.log(`[${callId}] LLM stream complete (${llmMs}ms, ${sentenceCount} sentences)`);
 
@@ -420,6 +459,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
 
   } catch (err) {
     console.error(`[${callId}] AI error:`, err.message);
+    if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
     if (callState.processingTimeout) {
       clearTimeout(callState.processingTimeout);
       callState.processingTimeout = null;
