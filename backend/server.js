@@ -220,6 +220,15 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     console.log(`[${callId}] Call active! Full-duplex VAD enabled.`);
 
+    // Proactive Launch Craft welcome greeting - caller hears intro immediately without needing to speak first
+    const greeting = `Hello! Welcome to Launch Craft Agency. We help businesses grow with Web Development, App Development, Brand Marketing including Meta Ads, YouTube, Instagram handling and Google Ads, AI Automation, and Voice Agents like me. How can I help you today?`;
+    synthesizeSpeech(greeting).then((greetingBuf) => {
+      if (greetingBuf && activeCalls.has(callId)) {
+        console.log(`[${callId}] Playing welcome greeting (${greetingBuf.length} bytes)`);
+        playAudioToCall(callId, greetingBuf);
+      }
+    }).catch((e) => console.error(`[${callId}] Greeting TTS error:`, e.message));
+
   } catch (err) {
     console.error(`[${callId}] Call error:`, err.message);
     cleanupCall(callId);
