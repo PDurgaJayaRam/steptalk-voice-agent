@@ -43,6 +43,9 @@ auth_info/
 *.ogg
 *.opus
 
+# Launch Craft leads (runtime)
+backend/leads.json
+
 # Python
 __pycache__/
 *.pyc

@@ -45,8 +45,30 @@ app.post('/webhook', async (req, res) => {
 
     const entry = body.entry?.[0];
     const change = entry?.changes?.[0];
-    const call = change?.value?.calls?.[0];
-    const contact = change?.value?.contacts?.[0];
+    const value = change?.value;
+
+    // ---- WhatsApp Chat Messages (Launch Craft) - ADDITIVE, does not affect calls ----
+    const messages = value?.messages;
+    const statuses = value?.statuses;
+    if (messages && messages.length > 0) {
+      // Handle chat messages async but respond 200 immediately to avoid retry
+      handleWhatsAppMessages(value).catch((e) => console.error('[Chat] handler error:', e.message));
+      // If there is also a call in same payload, continue to call handling below
+      // otherwise respond
+      if (!value?.calls?.[0]) {
+        res.sendStatus(200);
+        return;
+      }
+    }
+    if (statuses && !value?.calls?.[0] && !messages) {
+      // Status updates (delivered/read) - just ack
+      res.sendStatus(200);
+      return;
+    }
+
+    // ---- WhatsApp Calls (existing, untouched) ----
+    const call = value?.calls?.[0];
+    const contact = value?.contacts?.[0];
 
     if (!call || !call.id || !call.event) return res.sendStatus(200);
 
@@ -71,6 +93,52 @@ app.post('/webhook', async (req, res) => {
     res.sendStatus(200);
   }
 });
+
+// ---- Launch Craft Chat Handlers (additive) ----
+const { handleChatMessage } = require('./launchcraft');
+const { getLeads } = require('./leads');
+
+async function sendWhatsAppText(to, body) {
+  const phoneId = process.env.META_PHONE_NUMBER_ID;
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!phoneId || !token) {
+    console.error('[Chat] META credentials missing');
+    return false;
+  }
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v21.0/${phoneId}/messages`,
+      { messaging_product: 'whatsapp', to, type: 'text', text: { body, preview_url: false } },
+      { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+    );
+    console.log(`[Chat] Sent to ${to}: ${body.slice(0, 80)}...`);
+    return true;
+  } catch (err) {
+    console.error(`[Chat] Send failed to ${to}: ${err.response?.data?.error?.message || err.message}`);
+    return false;
+  }
+}
+
+async function handleWhatsAppMessages(value) {
+  const messages = value.messages || [];
+  const contacts = value.contacts || [];
+  for (const msg of messages) {
+    const from = msg.from;
+    const profileName = contacts.find((c) => c.wa_id === from)?.profile?.name || '';
+    // Only handle text for now; ignore other types gracefully
+    let text = '';
+    if (msg.type === 'text') text = msg.text?.body || '';
+    else if (msg.type === 'button') text = msg.button?.text || '';
+    else if (msg.type === 'interactive') text = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
+    else {
+      console.log(`[Chat] Ignoring non-text type: ${msg.type} from ${from}`);
+      continue;
+    }
+    if (!text) continue;
+    console.log(`[Chat] ${from} (${profileName}): ${text.slice(0, 100)}`);
+    await handleChatMessage({ from, text, profileName, sendMessage: sendWhatsAppText });
+  }
+}
 
 async function handleIncomingCall(callId, session, callerName, callerNumber) {
   if (!session?.sdp) return;
@@ -672,6 +740,11 @@ app.get('/api/status', (req, res) => {
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// ---- Launch Craft Leads API (additive) ----
+app.get('/api/leads', (req, res) => {
+  res.json({ count: getLeads().length, leads: getLeads() });
 });
 
 server.listen(PORT, () => {
