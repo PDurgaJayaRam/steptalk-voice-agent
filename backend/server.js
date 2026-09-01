@@ -37,6 +37,25 @@ function logLatency(callId, timings) {
   );
 }
 
+// PII discipline (free) — mask phone numbers in logs, truncate transcripts
+function maskWaId(waId) {
+  const s = String(waId || '');
+  if (s.length < 8) return s;
+  return s.slice(0, 2) + '******' + s.slice(-4);
+}
+function truncateLog(str, n = 60) {
+  const s = String(str || '');
+  return s.length > n ? s.slice(0, n) + '...' : s;
+}
+function setSessionState(callId, state) {
+  const cs = activeCalls.get(callId);
+  if (cs && cs.session) {
+    cs.session.state = state;
+    cs.session.timestamps[state] = Date.now();
+    console.log(`[${callId}] Session: ${state}`);
+  }
+}
+
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -90,7 +109,7 @@ app.post('/webhook', async (req, res) => {
       const callerName = contact?.profile?.name || 'Unknown';
       const callerNumber = contact?.wa_id || 'Unknown';
       const session = call.session;
-      console.log(`Call from ${callerName} (${callerNumber})`);
+      console.log(`Call from ${callerName} (${maskWaId(callerNumber)})`);
       await handleIncomingCall(callId, session, callerName, callerNumber);
     } else if (call.event === 'terminate') {
       console.log(`Terminated | duration=${call.duration || '?'}s status=${call.status || '?'}`);
@@ -122,10 +141,10 @@ async function sendWhatsAppText(to, body) {
       { messaging_product: 'whatsapp', to, type: 'text', text: { body, preview_url: false } },
       { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
     );
-    console.log(`[Chat] Sent to ${to}: ${body.slice(0, 80)}...`);
+    console.log(`[Chat] Sent to ${maskWaId(to)}: ${truncateLog(body, 80)}...`);
     return true;
   } catch (err) {
-    console.error(`[Chat] Send failed to ${to}: ${err.response?.data?.error?.message || err.message}`);
+    console.error(`[Chat] Send failed to ${maskWaId(to)}: ${err.response?.data?.error?.message || err.message}`);
     return false;
   }
 }
@@ -146,7 +165,7 @@ async function handleWhatsAppMessages(value) {
       continue;
     }
     if (!text) continue;
-    console.log(`[Chat] ${from} (${profileName}): ${text.slice(0, 100)}`);
+    console.log(`[Chat] ${maskWaId(from)} (${profileName}): ${truncateLog(text, 100)}`);
     await handleChatMessage({ from, text, profileName, sendMessage: sendWhatsAppText });
   }
 }
@@ -171,6 +190,14 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
       vadSilenceFrames: 0,
       captureCount: 0,
       leadCaptured: false,
+      // Consolidated session object (free, refactor) — single source of truth for call lifecycle
+      session: {
+        state: 'CONNECTING', // CONNECTING | GREETING | LISTENING | THINKING | SPEAKING | ENDED
+        agentState: 'idle',
+        currentTask: null,
+        retries: 0,
+        timestamps: { created: Date.now() },
+      },
     };
     activeCalls.set(callId, callState);
 
@@ -230,7 +257,9 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     startSilenceStreaming(callState);
 
-    console.log(`[${callId}] Call active! Full-duplex VAD enabled.`);
+    callState.session.state = 'GREETING';
+    callState.session.timestamps.greeting = Date.now();
+    console.log(`[${callId}] Call active! Full-duplex VAD enabled. Session: GREETING`);
 
     // Proactive Launch Craft welcome greeting - caller hears intro immediately without needing to speak first
     const greeting = `Hello! Welcome to Launch Craft Agency. We help businesses grow with Web Development, App Development, Brand Marketing including Meta Ads, YouTube, Instagram handling and Google Ads, AI Automation, and Voice Agents like me. How can I help you today?`;
@@ -238,6 +267,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
       if (greetingBuf && activeCalls.has(callId)) {
         console.log(`[${callId}] Playing welcome greeting (${greetingBuf.length} bytes)`);
         playAudioToCall(callId, greetingBuf);
+        callState.session.state = 'SPEAKING';
       }
     }).catch((e) => console.error(`[${callId}] Greeting TTS error:`, e.message));
 
@@ -421,6 +451,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
   const callState = activeCalls.get(callId);
   if (!callState) return;
 
+  setSessionState(callId, 'THINKING');
   let fillerTimer = null;
   try {
     const samples = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.byteLength / 2);
@@ -451,7 +482,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     const sttMs = Date.now() - sttStart;
     timings.t4 = Date.now();
     callTimings.set(callId, timings);
-    console.log(`[${callId}] STT (${sttMs}ms): "${text}"`);
+    console.log(`[${callId}] STT (${sttMs}ms): "${truncateLog(text, 80)}"`);
 
     if (!text || text.trim().length === 0) {
       console.log(`[${callId}] No speech detected`);
@@ -738,6 +769,7 @@ function playAudioToCall(callId, wavBuffer) {
   if (!callState || !callState.audioSource) return;
 
   try {
+    setSessionState(callId, 'SPEAKING');
     stopPlayback(callState);
     if (callState.silenceInterval) {
       clearInterval(callState.silenceInterval);
@@ -827,6 +859,7 @@ function playAudioToCall(callId, wavBuffer) {
       } else {
         console.log(`[${callId}] Playback complete (${frames.length} frames)`);
         callState.isPlaying = false;
+        setSessionState(callId, 'LISTENING');
         startSilenceStreaming(callState);
       }
     };
@@ -924,9 +957,10 @@ function cleanupCall(callId) {
       const outcome = durationSecs < 10 ? 'abandoned' : 'info_only';
       logVoiceOutcome({ waId: callState.callerNumber, outcome, durationSecs }).catch(() => {});
     }
+    if (callState.session) callState.session.state = 'ENDED';
     activeCalls.delete(callId);
     callTimings.delete(callId);
-    console.log(`[${callId}] Cleanup done`);
+    console.log(`[${callId}] Cleanup done (session: ENDED)`);
   }
 }
 
