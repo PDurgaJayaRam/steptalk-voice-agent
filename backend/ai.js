@@ -51,19 +51,23 @@ function getFillerText() {
 }
 
 // ---- Real-time web search: FREE, no API key required (DDG Instant + Wikipedia) ----
-// Optional upgrade: set TAVILY_API_KEY or BRAVE_API_KEY env for richer live results.
+// Narrowed (Fix 4): only fire for factual queries DDG/Wiki can answer (definitions, general facts).
+// Live queries (price/news/score/weather) are skipped — free tier returns empty/generic and wastes 0.8-1.5s.
+// Those live cases fall through to LLM which says "I don't have live data" per system prompt.
+// Optional upgrade: set TAVILY_API_KEY or BRAVE_API_KEY for true live web search; then broaden this.
 function needsWebSearch(text) {
   const q = text.toLowerCase();
-  const patterns = [
-    /\b(weather|temperature|forecast|humidity)\b/,
-    /\b(price|stock|crypto|bitcoin|ethereum|share|nifty|sensex)\b/,
-    /\b(news|latest|today|yesterday|this week|breaking)\b/,
-    /\b(score|match|game|live|result|won|winner)\b/,
-    /\b(who is|what is|when is|where is).*\b(today|now|current|latest)\b/,
-    /\b(current|real.?time|live|up.?to.?date)\b/,
-    /\b(headlines?|update|trending)\b/,
+  // Block live queries that free tier can't answer reliably
+  const livePattern = /\b(weather|temperature|forecast|humidity|price|stock|crypto|bitcoin|ethereum|share|nifty|sensex|news|score|match|game|live|cricket|today|tomorrow|yesterday|breaking|trending|headlines?|update|current|real.?time)\b/;
+  if (livePattern.test(q)) return false;
+
+  // Only factual definitional queries where DDG Instant / Wikipedia shine
+  const factualPatterns = [
+    /\b(what is|who is|who was|what was|where is|when is|which is)\b/,
+    /\b(define|definition|meaning of|explain|history of|capital of|full form|abbreviation)\b/,
+    /\b(how does|how to|why does|why is)\b/,
   ];
-  return patterns.some((re) => re.test(q));
+  return factualPatterns.some((re) => re.test(q));
 }
 
 async function searchDDGInstant(query) {
