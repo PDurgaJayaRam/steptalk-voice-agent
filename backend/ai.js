@@ -6,6 +6,60 @@ const { Readable } = require('stream');
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
+// ---- Speech normalization (free) — makes TTS sound natural for currency/time ----
+function normalizeForSpeech(text) {
+  let s = text;
+  // Currency
+  s = s.replace(/₹\s*/g, 'rupees ');
+  s = s.replace(/\bRs\.?\s*/gi, 'rupees ');
+  s = s.replace(/\$/g, ' dollars ');
+  s = s.replace(/%/g, ' percent ');
+  s = s.replace(/&/g, ' and ');
+  // Time: 10:30 AM -> 10 30 A M  (Fish TTS reads better without colon)
+  s = s.replace(/(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)\b/g, (m, h, mm, ap) => `${h} ${mm} ${ap.toUpperCase().split('').join(' ')}`);
+  s = s.replace(/\bAM\b/g, 'A M').replace(/\bPM\b/g, 'P M');
+  // Indian number words for rupees context: e.g., "4,50,000 rupees" -> spoken
+  s = s.replace(/(\d{1,2},)?\d{1,3},\d{3}\s*rupees/gi, (m) => {
+    const num = parseInt(m.replace(/[,\srupees]/gi, ''), 10);
+    if (isNaN(num)) return m;
+    return `${numberToIndianWords(num)} rupees`;
+  });
+  // General large numbers with commas: keep TTS-friendly (remove commas)
+  s = s.replace(/(\d),(\d)/g, '$1$2');
+  return s;
+}
+
+function numberToIndianWords(n) {
+  if (n === 0) return 'zero';
+  const a = ['', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+  const b = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+  function twoDigits(num) {
+    if (num < 20) return a[num];
+    return b[Math.floor(num / 10)] + (num % 10 ? ' ' + a[num % 10] : '');
+  }
+  let res = '';
+  const crore = Math.floor(n / 10000000);
+  if (crore) { res += twoDigits(crore) + ' crore '; n %= 10000000; }
+  const lakh = Math.floor(n / 100000);
+  if (lakh) { res += twoDigits(lakh) + ' lakh '; n %= 100000; }
+  const thousand = Math.floor(n / 1000);
+  if (thousand) { res += twoDigits(thousand) + ' thousand '; n %= 1000; }
+  const hundred = Math.floor(n / 100);
+  if (hundred) { res += a[hundred] + ' hundred '; n %= 100; }
+  if (n) res += twoDigits(n) + ' ';
+  return res.trim();
+}
+
+// ---- Knowledge base (free, keyword matching, no vector DB) ----
+let kbData = [];
+try { kbData = require('./knowledge-base.json'); } catch {}
+function getRelevantKBForVoice(userInput) {
+  const lower = (userInput || '').toLowerCase();
+  const relevant = kbData.filter((entry) => entry.keywords.some((k) => lower.includes(k)));
+  if (relevant.length === 0) return null;
+  return relevant.slice(0, 2).map((e) => e.snippet).join('\n');
+}
+
 // ---- Timeout + retry wrapper (free, no deps) — prevents hung external calls from freezing a live call ----
 async function callWithTimeout(fn, ms = 5000, retries = 1) {
   for (let i = 0; i <= retries; i++) {
@@ -240,9 +294,11 @@ const LAUNCH_CRAFT_VOICE_BASE =
   `Never use lists, markdown, or bullet points. This is a voice call, so be conversational.`;
 
 async function generateLLMResponse(userInput, searchContext = null) {
+  const kbSnippet = getRelevantKBForVoice(userInput);
+  const kbPrefix = kbSnippet ? `Relevant Launch Craft info: ${kbSnippet}\n` : '';
   const systemPrompt = searchContext
-    ? `${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, 10 words max. ALWAYS end with punctuation. Be natural and warm.`
-    : LAUNCH_CRAFT_VOICE_BASE + ` Answer in ONE short sentence, 10 words max, ALWAYS end with punctuation (period, exclamation, or question mark).`;
+    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, 10 words max. ALWAYS end with punctuation. Be natural and warm.`
+    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} Answer in ONE short sentence, 10 words max, ALWAYS end with punctuation (period, exclamation, or question mark).`;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userInput }
@@ -275,9 +331,11 @@ async function generateLLMResponse(userInput, searchContext = null) {
 }
 
 async function* generateLLMResponseStream(userInput, searchContext = null) {
+  const kbSnippet = getRelevantKBForVoice(userInput);
+  const kbPrefix = kbSnippet ? `Relevant Launch Craft info: ${kbSnippet}\n` : '';
   const systemPrompt = searchContext
-    ? `${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, 10 words max, ALWAYS end with punctuation. Be natural and warm. If info is missing, say you could not find live data.`
-    : LAUNCH_CRAFT_VOICE_BASE + ` Answer in ONE short sentence, 10 words max, ALWAYS end with punctuation (period, exclamation, or question mark).`;
+    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, 10 words max, ALWAYS end with punctuation. Be natural and warm. If info is missing, say you could not find live data.`
+    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} Answer in ONE short sentence, 10 words max, ALWAYS end with punctuation (period, exclamation, or question mark).`;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userInput }
@@ -343,10 +401,12 @@ async function* generateLLMResponseStream(userInput, searchContext = null) {
 }
 
 async function synthesizeSpeech(text) {
+  const normalized = normalizeForSpeech(text);
+  if (normalized !== text) console.log(`[TTS] Normalized: "${text.slice(0,60)}..." -> "${normalized.slice(0,60)}..."`);
   try {
     return await callWithTimeout(async (signal) => {
       const voiceId = process.env.FISH_VOICE_ID;
-      console.log(`[TTS] Fish Audio: voice=${voiceId} text="${text.substring(0, 60)}..."`);
+      console.log(`[TTS] Fish Audio: voice=${voiceId} text="${normalized.substring(0, 60)}..."`);
 
       const response = await fetch('https://api.fish.audio/v1/tts', {
         method: 'POST',
@@ -356,7 +416,7 @@ async function synthesizeSpeech(text) {
           'model': 's2.1-pro-free'
         },
         body: JSON.stringify({
-          text,
+          text: normalized,
           reference_id: voiceId,
           format: 'wav',
           sample_rate: 44100,

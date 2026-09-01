@@ -1,5 +1,13 @@
 const { generateLLMResponse } = require('./ai');
 const { saveLead, notifyOwner } = require('./leads');
+const kb = require('./knowledge-base.json');
+
+function getRelevantKB(userText) {
+  const lower = userText.toLowerCase();
+  const relevant = kb.filter((entry) => entry.keywords.some((k) => lower.includes(k)));
+  if (relevant.length === 0) return null;
+  return relevant.slice(0, 2).map((e) => e.snippet).join('\n');
+}
 
 const SERVICES = [
   'Web Development',
@@ -120,12 +128,13 @@ async function handleChatMessage({ from, text, profileName, sendMessage }) {
     return;
   }
 
-  // Fallback: use LLM for open-ended questions about Launch Craft
+  // Fallback: use LLM for open-ended questions about Launch Craft — inject KB if matched
   try {
-    const llmText = await generateLLMResponse(
-      `Client said: "${trimmed}". ${LAUNCH_CRAFT_CHAT_PROMPT} Reply helpfully and end by asking if they want to schedule a call with the team.`,
-      null
-    );
+    const kbContext = getRelevantKB(trimmed);
+    const prompt = kbContext
+      ? `Client said: "${trimmed}". ${LAUNCH_CRAFT_CHAT_PROMPT}\nRelevant info: ${kbContext}\nReply helpfully and end by asking if they want to schedule a call with the team.`
+      : `Client said: "${trimmed}". ${LAUNCH_CRAFT_CHAT_PROMPT} Reply helpfully and end by asking if they want to schedule a call with the team.`;
+    const llmText = await generateLLMResponse(prompt, null);
     let reply = llmText || `I can help you with Web Development, App Development, Brand Marketing, AI Automation, or Voice Agents. What do you need?`;
     // Ensure meeting CTA
     if (!/meeting|call|schedule/i.test(reply)) {
@@ -211,4 +220,5 @@ module.exports = {
   chatStates,
   isMeetingIntent,
   detectService,
+  getRelevantKB,
 };

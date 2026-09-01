@@ -1,0 +1,37 @@
+[
+  {
+    "id": "web-dev",
+    "keywords": ["website", "web", "web development", "landing page", "ecommerce", "e-commerce", "shopify", "wordpress", "frontend", "backend"],
+    "snippet": "Web Development at Launch Craft: custom responsive websites, landing pages, e-commerce (Shopify/WooCommerce) and web apps. Fast, SEO-ready, mobile-first. Pricing discussed on call."
+  },
+  {
+    "id": "app-dev",
+    "keywords": ["app", "application", "app development", "android", "ios", "mobile app", "flutter", "react native"],
+    "snippet": "App Development at Launch Craft: Android, iOS and cross-platform apps (Flutter/React Native). From MVP to Play Store launch."
+  },
+  {
+    "id": "brand-marketing",
+    "keywords": ["marketing", "brand", "ads", "advertising", "meta", "facebook", "instagram", "youtube", "google ads", "campaign", "handling"],
+    "snippet": "Brand Marketing at Launch Craft: Meta Ads, Google Ads, YouTube growth and full Instagram handling (content + ads + DM). We handle strategy, creatives and daily optimization."
+  },
+  {
+    "id": "ai-automation",
+    "keywords": ["ai", "automation", "automate", "ai automation", "workflow", "chatbot", "agent"],
+    "snippet": "AI Automation at Launch Craft: chatbots, workflow automation and custom AI tools that save hours daily. Built around your existing tools."
+  },
+  {
+    "id": "voice-agents",
+    "keywords": ["voice", "voice agent", "voice bot", "calling", "ivr", "phone bot", "whatsapp call", "steptalk"],
+    "snippet": "Voice Agents at Launch Craft: like me — automated WhatsApp calling that answers, qualifies and books meetings 24/7. Same tech as this bot."
+  },
+  {
+    "id": "process",
+    "keywords": ["process", "how does it work", "timeline", "how long", "steps"],
+    "snippet": "Our process: 1) quick discovery call, 2) proposal, 3) build, 4) launch and support. Timelines depend on scope — discussed on the call."
+  },
+  {
+    "id": "pricing-general",
+    "keywords": ["price", "pricing", "cost", "budget", "quote", "how much"],
+    "snippet": "Pricing at Launch Craft is custom by scope. We share a clear quote after the discovery call — no hidden fees. Tell us your service and budget and we'll propose a plan."
+  }
+]
