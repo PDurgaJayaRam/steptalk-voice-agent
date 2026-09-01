@@ -512,7 +512,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         data.phone = data.callerNumber;
         data.waId = data.callerNumber;
         console.log(`[${callId}] Voice lead: time=${time} -> saving`);
-        const lead = saveVoiceLead({
+        const lead = await saveVoiceLead({
           name: data.name,
           phone: data.callerNumber,
           waId: data.callerNumber,
@@ -929,8 +929,9 @@ app.get('/api/health', (req, res) => {
 });
 
 // ---- Launch Craft Leads API (additive) ----
-app.get('/api/leads', (req, res) => {
-  res.json({ count: getLeads().length, leads: getLeads() });
+app.get('/api/leads', async (req, res) => {
+  const all = await getLeads();
+  res.json({ count: all.length, leads: all });
 });
 
 server.listen(PORT, () => {

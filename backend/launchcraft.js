@@ -170,8 +170,8 @@ async function handleMeetingFlow(waId, text, state, sendMessage, profileName) {
       data.phone = waId;
       data.profileName = profileName;
 
-      // Save lead
-      const lead = saveLead({
+      // Save lead (persistent if DATABASE_URL set)
+      const lead = await saveLead({
         name: data.name,
         phone: waId,
         waId,

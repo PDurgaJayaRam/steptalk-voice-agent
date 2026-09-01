@@ -15,6 +15,7 @@
     "form-data": "^4.0.6",
     "lamejs": "^1.2.1",
     "msedge-tts": "^2.0.7",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "pg": "^8.12.0"
   }
 }
