@@ -107,7 +107,7 @@ app.post('/webhook', async (req, res) => {
 
 // ---- Launch Craft Chat Handlers (additive) ----
 const { handleChatMessage, isMeetingIntent: isVoiceMeetingIntent, detectService: detectVoiceService } = require('./launchcraft');
-const { getLeads, saveLead: saveVoiceLead, notifyOwner: notifyVoiceOwner } = require('./leads');
+const { getLeads, saveLead: saveVoiceLead, notifyOwner: notifyVoiceOwner, logCallOutcome: logVoiceOutcome, enrichLead: enrichVoiceLead, getCallOutcomes } = require('./leads');
 
 async function sendWhatsAppText(to, body) {
   const phoneId = process.env.META_PHONE_NUMBER_ID;
@@ -170,6 +170,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
       vadSpeechFrames: 0,
       vadSilenceFrames: 0,
       captureCount: 0,
+      leadCaptured: false,
     };
     activeCalls.set(callId, callState);
 
@@ -512,7 +513,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         data.phone = data.callerNumber;
         data.waId = data.callerNumber;
         console.log(`[${callId}] Voice lead: time=${time} -> saving`);
-        const lead = await saveVoiceLead({
+        let lead = await saveVoiceLead({
           name: data.name,
           phone: data.callerNumber,
           waId: data.callerNumber,
@@ -522,6 +523,9 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
           profileName: data.callerName,
           source: 'whatsapp_call',
         });
+        callState.leadCaptured = true;
+        enrichVoiceLead(lead).catch(() => {});
+        logVoiceOutcome({ waId: data.callerNumber, outcome: 'lead_captured', durationSecs: Math.round((Date.now() - callState.startTime) / 1000) }).catch(() => {});
         notifyVoiceOwner(lead).catch(()=>{});
         // Notify caller via WhatsApp text as well
         if (data.callerNumber && data.callerNumber !== 'Unknown') {
@@ -914,6 +918,12 @@ function cleanupCall(callId) {
     if (callState.audioSink) { try { callState.audioSink.close(); } catch(e) {} }
     if (callState.audioSource) { try { callState.audioSource.close(); } catch(e) {} }
     if (callState.pc) { try { callState.pc.close(); } catch(e) {} }
+    // Outcome logging (free, no deps) — lead_captured already logged, else classify
+    if (!callState.leadCaptured && callState.callerNumber) {
+      const durationSecs = Math.round((Date.now() - callState.startTime) / 1000);
+      const outcome = durationSecs < 10 ? 'abandoned' : 'info_only';
+      logVoiceOutcome({ waId: callState.callerNumber, outcome, durationSecs }).catch(() => {});
+    }
     activeCalls.delete(callId);
     callTimings.delete(callId);
     console.log(`[${callId}] Cleanup done`);
@@ -932,6 +942,10 @@ app.get('/api/health', (req, res) => {
 app.get('/api/leads', async (req, res) => {
   const all = await getLeads();
   res.json({ count: all.length, leads: all });
+});
+app.get('/api/outcomes', async (req, res) => {
+  const all = await getCallOutcomes();
+  res.json({ count: all.length, outcomes: all });
 });
 
 server.listen(PORT, () => {

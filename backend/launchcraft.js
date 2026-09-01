@@ -1,5 +1,5 @@
 const { generateLLMResponse } = require('./ai');
-const { saveLead, notifyOwner } = require('./leads');
+const { saveLead, notifyOwner, enrichLead, logCallOutcome } = require('./leads');
 const kb = require('./knowledge-base.json');
 
 function getRelevantKB(userText) {
@@ -180,7 +180,7 @@ async function handleMeetingFlow(waId, text, state, sendMessage, profileName) {
       data.profileName = profileName;
 
       // Save lead (persistent if DATABASE_URL set)
-      const lead = await saveLead({
+      let lead = await saveLead({
         name: data.name,
         phone: waId,
         waId,
@@ -191,7 +191,13 @@ async function handleMeetingFlow(waId, text, state, sendMessage, profileName) {
         source: 'whatsapp_chat',
       });
 
-      // Notify owner (fire and forget)
+      // Enrich + outcome (free, async, no await) + owner notify
+      enrichLead(lead).then((enriched) => {
+        if (enriched.summary || enriched.needs_human) {
+          notifyOwner({ ...enriched, summary: enriched.summary ? `\nSummary: ${enriched.summary}` : '' }).catch(() => {});
+        }
+      }).catch(() => {});
+      logCallOutcome({ waId, outcome: 'lead_captured', durationSecs: null }).catch(() => {});
       notifyOwner(lead).catch(() => {});
 
       chatStates.delete(waId);

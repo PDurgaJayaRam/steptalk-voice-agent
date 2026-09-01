@@ -31,6 +31,30 @@ async function initPostgres() {
         message TEXT,
         profile_name TEXT,
         source TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        urgency TEXT,
+        budget_mentioned TEXT,
+        sentiment TEXT,
+        needs_human BOOLEAN,
+        objections TEXT,
+        summary TEXT,
+        outcome TEXT
+      );
+    `);
+    // Add columns if table existed before (idempotent)
+    await pgPool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS urgency TEXT`);
+    await pgPool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS budget_mentioned TEXT`);
+    await pgPool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS sentiment TEXT`);
+    await pgPool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS needs_human BOOLEAN`);
+    await pgPool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS objections TEXT`);
+    await pgPool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS summary TEXT`);
+    await pgPool.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS outcome TEXT`);
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS call_outcomes (
+        id TEXT PRIMARY KEY,
+        wa_id TEXT,
+        outcome TEXT,
+        duration_secs INTEGER,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
     `);
@@ -67,9 +91,9 @@ async function saveLead(lead) {
   if (usePostgres && pgPool) {
     try {
       await pgPool.query(
-        `INSERT INTO leads (id, name, phone, wa_id, service, preferred_time, message, profile_name, source, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [lead.id, lead.name || null, lead.phone || null, lead.waId || null, lead.service || null, lead.preferredTime || null, lead.message || null, lead.profileName || null, lead.source || null, lead.createdAt]
+        `INSERT INTO leads (id, name, phone, wa_id, service, preferred_time, message, profile_name, source, created_at, urgency, budget_mentioned, sentiment, needs_human, objections, summary, outcome)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+        [lead.id, lead.name || null, lead.phone || null, lead.waId || null, lead.service || null, lead.preferredTime || null, lead.message || null, lead.profileName || null, lead.source || null, lead.createdAt, lead.urgency || null, lead.budget_mentioned || null, lead.sentiment || null, lead.needs_human || false, lead.objections ? JSON.stringify(lead.objections) : null, lead.summary || null, lead.outcome || 'lead_captured']
       );
       console.log(`[Leads] Saved to Postgres: ${lead.id}`);
       return lead;
@@ -92,13 +116,68 @@ async function saveLead(lead) {
 async function getLeads() {
   if (usePostgres && pgPool) {
     try {
-      const r = await pgPool.query('SELECT id, name, phone, wa_id as "waId", service, preferred_time as "preferredTime", message, profile_name as "profileName", source, created_at as "createdAt" FROM leads ORDER BY created_at DESC LIMIT 500');
-      return r.rows;
+      const r = await pgPool.query('SELECT id, name, phone, wa_id as "waId", service, preferred_time as "preferredTime", message, profile_name as "profileName", source, created_at as "createdAt", urgency, budget_mentioned as "budgetMentioned", sentiment, needs_human as "needsHuman", objections, summary, outcome FROM leads ORDER BY created_at DESC LIMIT 500');
+      return r.rows.map(row => {
+        if (row.objections) { try { row.objections = JSON.parse(row.objections); } catch {} }
+        return row;
+      });
     } catch (e) {
       console.error('[Leads] Postgres get failed:', e.message);
     }
   }
   return leads;
+}
+
+async function logCallOutcome({ waId, outcome, durationSecs }) {
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  if (usePostgres && pgPool) {
+    try {
+      await pgPool.query(`INSERT INTO call_outcomes (id, wa_id, outcome, duration_secs) VALUES ($1,$2,$3,$4)`, [id, waId || null, outcome, durationSecs || null]);
+      console.log(`[Leads] Call outcome logged: ${outcome} waId=${waId}`);
+      return;
+    } catch (e) {
+      console.error('[Leads] Call outcome log failed:', e.message);
+    }
+  }
+  console.log(`[Leads] Call outcome (file mode, not persisted): ${outcome} waId=${waId}`);
+}
+
+async function getCallOutcomes() {
+  if (usePostgres && pgPool) {
+    try {
+      const r = await pgPool.query(`SELECT * FROM call_outcomes ORDER BY created_at DESC LIMIT 200`);
+      return r.rows;
+    } catch {}
+  }
+  return [];
+}
+
+// Structured extraction + summary (free, reuses NVIDIA endpoint via ai.js)
+async function enrichLead(lead) {
+  try {
+    const { generateLLMResponse } = require('./ai');
+    const prompt = `Extract structured JSON for this lead. Lead: name=${lead.name}, service=${lead.service}, message="${(lead.message || '').slice(0, 300)}", preferredTime=${lead.preferredTime}. Return ONLY valid JSON with keys: urgency (low/medium/high), budget_mentioned (string or null), sentiment (positive/neutral/negative), needs_human (boolean), objections (array of strings), summary (2 sentences). No markdown.`;
+    const raw = await generateLLMResponse(prompt);
+    const jsonStr = (raw.match(/\{[\s\S]*\}/) || [])[0];
+    if (!jsonStr) return lead;
+    const parsed = JSON.parse(jsonStr);
+    lead.urgency = parsed.urgency || 'low';
+    lead.budget_mentioned = parsed.budget_mentioned || null;
+    lead.sentiment = parsed.sentiment || 'neutral';
+    lead.needs_human = !!parsed.needs_human;
+    lead.objections = Array.isArray(parsed.objections) ? parsed.objections : [];
+    lead.summary = parsed.summary || null;
+    lead.outcome = lead.needs_human ? 'needs_human' : 'lead_captured';
+    // Update row if postgres
+    if (usePostgres && pgPool) {
+      await pgPool.query(`UPDATE leads SET urgency=$1, budget_mentioned=$2, sentiment=$3, needs_human=$4, objections=$5, summary=$6, outcome=$7 WHERE id=$8`, [lead.urgency, lead.budget_mentioned, lead.sentiment, lead.needs_human, JSON.stringify(lead.objections), lead.summary, lead.outcome, lead.id]);
+      console.log(`[Leads] Enriched ${lead.id}: urgency=${lead.urgency} needs_human=${lead.needs_human}`);
+    }
+    return lead;
+  } catch (e) {
+    console.log(`[Leads] Enrich failed: ${e.message}`);
+    return lead;
+  }
 }
 
 async function notifyOwner(lead) {
@@ -140,4 +219,4 @@ async function notifyOwner(lead) {
   }
 }
 
-module.exports = { saveLead, getLeads, notifyOwner, OWNER_NUMBER, pgReady };
+module.exports = { saveLead, getLeads, notifyOwner, OWNER_NUMBER, pgReady, logCallOutcome, getCallOutcomes, enrichLead };
