@@ -210,4 +210,5 @@ module.exports = {
   SERVICES,
   chatStates,
   isMeetingIntent,
+  detectService,
 };

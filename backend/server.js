@@ -95,8 +95,8 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ---- Launch Craft Chat Handlers (additive) ----
-const { handleChatMessage } = require('./launchcraft');
-const { getLeads } = require('./leads');
+const { handleChatMessage, isMeetingIntent: isVoiceMeetingIntent, detectService: detectVoiceService } = require('./launchcraft');
+const { getLeads, saveLead: saveVoiceLead, notifyOwner: notifyVoiceOwner } = require('./leads');
 
 async function sendWhatsAppText(to, body) {
   const phoneId = process.env.META_PHONE_NUMBER_ID;
@@ -430,6 +430,108 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
 
     if (!text || text.trim().length === 0) {
       console.log(`[${callId}] No speech detected`);
+      callState.isProcessing = false;
+      return;
+    }
+
+    // ---- Launch Craft Voice Lead Flow (collect details, notify owner) ----
+
+    // If already in voice lead collection, continue flow
+    if (callState.voiceLead && callState.voiceLead.step) {
+      const step = callState.voiceLead.step;
+      const data = callState.voiceLead.data;
+      if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+      // Step handlers
+      if (step === 'ask_name') {
+        const name = text.trim().slice(0, 60).replace(/my name is/i, '').trim() || data.callerName || 'there';
+        data.name = name;
+        console.log(`[${callId}] Voice lead: name=${name}`);
+        if (data.detectedService) {
+          data.service = data.detectedService;
+          callState.voiceLead.step = 'ask_time';
+          const askTime = `Thanks ${name}! When should the Launch Craft Team call you? You can say tomorrow morning, tonight, or any time that works for you.`;
+          const buf = await synthesizeSpeech(askTime);
+          if (buf) playAudioToCall(callId, buf);
+          // Also send WhatsApp text fallback to caller
+          if (data.callerNumber && data.callerNumber !== 'Unknown') {
+            sendWhatsAppText(data.callerNumber, `Hi ${name}! When should we call you? Reply with preferred time.`).catch(()=>{});
+          }
+        } else {
+          callState.voiceLead.step = 'ask_service';
+          const askSvc = `Thanks ${name}! Which service are you interested in? We offer Web Development, App Development, Brand Marketing, AI Automation, or Voice Agents.`;
+          const buf = await synthesizeSpeech(askSvc);
+          if (buf) playAudioToCall(callId, buf);
+        }
+        if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
+        callState.isProcessing = false;
+        return;
+      }
+      if (step === 'ask_service') {
+        const svc = detectVoiceService(text) || text.trim().slice(0, 80);
+        data.service = svc;
+        console.log(`[${callId}] Voice lead: service=${svc}`);
+        callState.voiceLead.step = 'ask_time';
+        const askTime = `Great, ${svc} it is! When should the team call you back? You can say tomorrow eleven A M, or this evening.`;
+        const buf = await synthesizeSpeech(askTime);
+        if (buf) playAudioToCall(callId, buf);
+        if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
+        callState.isProcessing = false;
+        return;
+      }
+      if (step === 'ask_time') {
+        const time = text.trim().slice(0, 100);
+        data.preferredTime = time;
+        data.phone = data.callerNumber;
+        data.waId = data.callerNumber;
+        console.log(`[${callId}] Voice lead: time=${time} -> saving`);
+        const lead = saveVoiceLead({
+          name: data.name,
+          phone: data.callerNumber,
+          waId: data.callerNumber,
+          service: data.service || 'General inquiry',
+          preferredTime: data.preferredTime,
+          message: data.originalMessage,
+          profileName: data.callerName,
+          source: 'whatsapp_call',
+        });
+        notifyVoiceOwner(lead).catch(()=>{});
+        // Notify caller via WhatsApp text as well
+        if (data.callerNumber && data.callerNumber !== 'Unknown') {
+          sendWhatsAppText(
+            data.callerNumber,
+            `✅ Hi ${data.name}! Your meeting for *${data.service || 'Launch Craft services'}* at *${time}* is scheduled. The Launch Craft Team will call you within a few minutes on this number. Thank you! 🚀`
+          ).catch(()=>{});
+        }
+        callState.voiceLead = null;
+        const confirm = `Thank you ${data.name}! Your meeting for ${data.service || 'Launch Craft services'} at ${time} is scheduled. The Launch Craft Team will reach out to you within a few minutes. We appreciate your interest!`;
+        const buf = await synthesizeSpeech(confirm);
+        if (buf) playAudioToCall(callId, buf);
+        if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
+        callState.isProcessing = false;
+        return;
+      }
+      // fallback clear
+      callState.voiceLead = null;
+    }
+
+    // Check if new meeting intent -> start collection instead of normal LLM
+    if (isVoiceMeetingIntent(text)) {
+      console.log(`[${callId}] Voice meeting intent detected: "${text.slice(0,60)}"`);
+      if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+      const detectedSvc = detectVoiceService(text);
+      callState.voiceLead = {
+        step: 'ask_name',
+        data: {
+          callerNumber: callState.callerNumber,
+          callerName: callState.callerName,
+          originalMessage: text,
+          detectedService: detectedSvc,
+        },
+      };
+      const askName = `Great! I can schedule a call with the Launch Craft Team for you. May I know your name please?`;
+      const buf = await synthesizeSpeech(askName);
+      if (buf) playAudioToCall(callId, buf);
+      if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
       callState.isProcessing = false;
       return;
     }
