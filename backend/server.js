@@ -26,6 +26,17 @@ const VAD = {
   BARGE_IN_THRESHOLD: 200,
 };
 
+// Per-call latency instrumentation (Fix 3) — keyed by callId, logged per utterance
+const callTimings = new Map(); // callId -> { t0, t2 } for VAD; per-utterance timings logged in processAudioForAI
+function logLatency(callId, timings) {
+  const d = (a, b) => (a && b ? `${b - a}ms` : '-');
+  console.log(
+    `[LATENCY] ${callId} vad_detect=${d(timings.t0, timings.t2)} stt=${d(timings.t3, timings.t4)} ` +
+      `llm_ttft=${d(timings.t5, timings.t6)} tts=${d(timings.t7, timings.t8)} total=${d(timings.t0, timings.t8)} ` +
+      `| t0=${timings.t0 || '-'} t2=${timings.t2 || '-'} t3=${timings.t3 || '-'} t4=${timings.t4 || '-'} t5=${timings.t5 || '-'} t6=${timings.t6 || '-'} t7=${timings.t7 || '-'} t8=${timings.t8 || '-'}`
+  );
+}
+
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -355,6 +366,10 @@ async function handleCapturedAudio(callId, data) {
             callState.audioBuffer = Buffer.alloc(0);
             const binary = Buffer.from(samples instanceof Int16Array ? samples.buffer : new Int16Array(samples).buffer);
             callState.audioBuffer = Buffer.concat([callState.audioBuffer, binary]);
+            // T0 — first speech frame crosses threshold
+            const t = callTimings.get(callId) || {};
+            t.t0 = Date.now();
+            callTimings.set(callId, t);
           }
         } else {
           callState.vadSpeechFrames = 0;
@@ -376,6 +391,10 @@ async function handleCapturedAudio(callId, data) {
             callState.audioBuffer = Buffer.alloc(0);
 
             if (audioToProcess.length > 0) {
+              // T2 — utterance finalized (silence-after triggers)
+              const t2 = callTimings.get(callId) || {};
+              t2.t2 = Date.now();
+              callTimings.set(callId, t2);
               callState.isProcessing = true;
               callState.processingTimeout = setTimeout(() => {
                 if (callState.isProcessing) {
@@ -423,14 +442,20 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     }
 
     const wavBuffer = pcmToWav(audioToTranscribe, audioSampleRate, 1, 16);
+    // T3/T4 — STT
+    const timings = callTimings.get(callId) || {};
+    timings.t3 = Date.now();
     const sttStart = Date.now();
     const text = await transcribeAudio(wavBuffer);
     const sttMs = Date.now() - sttStart;
+    timings.t4 = Date.now();
+    callTimings.set(callId, timings);
     console.log(`[${callId}] STT (${sttMs}ms): "${text}"`);
 
     if (!text || text.trim().length === 0) {
       console.log(`[${callId}] No speech detected`);
       callState.isProcessing = false;
+      if (callTimings.has(callId)) { logLatency(callId, callTimings.get(callId)); callTimings.delete(callId); }
       return;
     }
 
@@ -464,6 +489,8 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         }
         if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
         callState.isProcessing = false;
+        // latency for voice lead ask_name (no LLM) - log stt + cleanup
+        if (callTimings.has(callId)) { logLatency(callId, callTimings.get(callId)); callTimings.delete(callId); }
         return;
       }
       if (step === 'ask_service') {
@@ -476,6 +503,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         if (buf) playAudioToCall(callId, buf);
         if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
         callState.isProcessing = false;
+        if (callTimings.has(callId)) { logLatency(callId, callTimings.get(callId)); callTimings.delete(callId); }
         return;
       }
       if (step === 'ask_time') {
@@ -508,6 +536,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         if (buf) playAudioToCall(callId, buf);
         if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
         callState.isProcessing = false;
+        if (callTimings.has(callId)) { logLatency(callId, callTimings.get(callId)); callTimings.delete(callId); }
         return;
       }
       // fallback clear
@@ -533,6 +562,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       if (buf) playAudioToCall(callId, buf);
       if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
       callState.isProcessing = false;
+      if (callTimings.has(callId)) { logLatency(callId, callTimings.get(callId)); callTimings.delete(callId); }
       return;
     }
 
@@ -573,6 +603,10 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     }
 
     const llmStart = Date.now();
+    // T5 — LLM stream start
+    const t = callTimings.get(callId) || {};
+    t.t5 = Date.now();
+    callTimings.set(callId, t);
     let sentenceBuffer = '';
 
     for await (const token of generateLLMResponseStream(text, searchContext)) {
@@ -600,6 +634,19 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         if (sentence.length > 3) {
           sentenceCount++;
           if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+          // T6 — first sentence flushed to TTS
+          if (sentenceCount === 1) {
+            const t6 = callTimings.get(callId) || {};
+            t6.t6 = Date.now();
+            callTimings.set(callId, t6);
+          }
+          // T7 — TTS start for first sentence
+          const isFirstTts = sentenceCount === 1;
+          if (isFirstTts) {
+            const t7 = callTimings.get(callId) || {};
+            t7.t7 = Date.now();
+            callTimings.set(callId, t7);
+          }
           const ttsStart = Date.now();
           const ttsBuffer = await synthesizeSpeech(sentence);
           const ttsMs = Date.now() - ttsStart;
@@ -607,6 +654,14 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
           if (ttsBuffer) {
             console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
             playAudioToCall(callId, ttsBuffer);
+            // T8 — first audio frame written
+            if (isFirstTts) {
+              const t8 = callTimings.get(callId) || {};
+              t8.t8 = Date.now();
+              callTimings.set(callId, t8);
+              logLatency(callId, t8);
+              callTimings.delete(callId);
+            }
           }
         }
       }
@@ -616,6 +671,13 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     if (remaining.length > 0) {
       sentenceCount++;
       if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+      const isFirstRemaining = sentenceCount === 1;
+      if (isFirstRemaining) {
+        const t6 = callTimings.get(callId) || {};
+        t6.t6 = Date.now();
+        t6.t7 = Date.now();
+        callTimings.set(callId, t6);
+      }
       const ttsStart = Date.now();
       const ttsBuffer = await synthesizeSpeech(remaining);
       const ttsMs = Date.now() - ttsStart;
@@ -623,12 +685,24 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       if (ttsBuffer) {
         console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
         playAudioToCall(callId, ttsBuffer);
+        if (isFirstRemaining) {
+          const t8 = callTimings.get(callId) || {};
+          t8.t8 = Date.now();
+          callTimings.set(callId, t8);
+          logLatency(callId, t8);
+          callTimings.delete(callId);
+        }
       }
     }
 
     if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
     const llmMs = Date.now() - llmStart;
     console.log(`[${callId}] LLM stream complete (${llmMs}ms, ${sentenceCount} sentences)`);
+    // If no T8 was logged (e.g., no TTS succeeded), log what we have
+    if (callTimings.has(callId)) {
+      logLatency(callId, callTimings.get(callId));
+      callTimings.delete(callId);
+    }
 
     if (callState.processingTimeout) {
       clearTimeout(callState.processingTimeout);
@@ -841,6 +915,7 @@ function cleanupCall(callId) {
     if (callState.audioSource) { try { callState.audioSource.close(); } catch(e) {} }
     if (callState.pc) { try { callState.pc.close(); } catch(e) {} }
     activeCalls.delete(callId);
+    callTimings.delete(callId);
     console.log(`[${callId}] Cleanup done`);
   }
 }
