@@ -6,28 +6,46 @@ const { Readable } = require('stream');
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
+// ---- Timeout + retry wrapper (free, no deps) — prevents hung external calls from freezing a live call ----
+async function callWithTimeout(fn, ms = 5000, retries = 1) {
+  for (let i = 0; i <= retries; i++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      const result = await fn(controller.signal);
+      clearTimeout(timer);
+      return result;
+    } catch (err) {
+      clearTimeout(timer);
+      const isAbort = err.name === 'AbortError' || err.message.includes('aborted');
+      console.log(`[Timeout] attempt ${i + 1}/${retries + 1} ${isAbort ? 'timed out' : err.message}`);
+      if (i === retries) throw err;
+    }
+  }
+}
+
 async function transcribeAudio(wavBuffer) {
   try {
-    const formData = new FormData();
-    formData.append('file', Readable.from(wavBuffer), { filename: 'audio.wav', contentType: 'audio/wav' });
-    formData.append('model', 'whisper-large-v3-turbo');
-    formData.append('language', 'en');
+    return await callWithTimeout(async (signal) => {
+      const formData = new FormData();
+      formData.append('file', Readable.from(wavBuffer), { filename: 'audio.wav', contentType: 'audio/wav' });
+      formData.append('model', 'whisper-large-v3-turbo');
+      formData.append('language', 'en');
 
-    const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${GROQ_API_KEY}`,
-        ...formData.getHeaders()
-      },
-      body: formData
-    });
+      const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, ...formData.getHeaders() },
+        body: formData,
+        signal,
+      });
 
-    const data = await response.json();
-    if (data.error) {
-      console.error('Groq STT error:', JSON.stringify(data.error));
-      return '';
-    }
-    return data.text || '';
+      const data = await response.json();
+      if (data.error) {
+        console.error('Groq STT error:', JSON.stringify(data.error));
+        return '';
+      }
+      return data.text || '';
+    }, 8000, 1);
   } catch (error) {
     console.error('STT Error:', error.message);
     return '';
@@ -231,26 +249,17 @@ async function generateLLMResponse(userInput, searchContext = null) {
   ];
 
   try {
-    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${NVIDIA_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'meta/llama-3.2-11b-vision-instruct',
-        messages,
-        stream: false,
-        max_tokens: 100,
-        temperature: 0.5
-      })
-    });
-
-    const data = await response.json();
-
-    if (data.error) {
-      throw new Error(data.error.message || JSON.stringify(data.error));
-    }
+    const data = await callWithTimeout(async (signal) => {
+      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${NVIDIA_API_KEY}` },
+        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: false, max_tokens: 100, temperature: 0.5 }),
+        signal,
+      });
+      const j = await response.json();
+      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      return j;
+    }, 10000, 1);
 
     if (data.choices && data.choices.length > 0) {
       let content = data.choices[0].message.content || '';
@@ -275,20 +284,14 @@ async function* generateLLMResponseStream(userInput, searchContext = null) {
   ];
 
   try {
-    const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${NVIDIA_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'meta/llama-3.2-11b-vision-instruct',
-        messages,
-        stream: true,
-        max_tokens: 100,
-        temperature: 0.5
-      })
-    });
+    const response = await callWithTimeout(async (signal) => {
+      return await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${NVIDIA_API_KEY}` },
+        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: true, max_tokens: 100, temperature: 0.5 }),
+        signal,
+      });
+    }, 10000, 1);
 
     if (!response.ok) {
       const errText = await response.text();
@@ -341,38 +344,41 @@ async function* generateLLMResponseStream(userInput, searchContext = null) {
 
 async function synthesizeSpeech(text) {
   try {
-    const voiceId = process.env.FISH_VOICE_ID;
-    console.log(`[TTS] Fish Audio: voice=${voiceId} text="${text.substring(0, 60)}..."`);
+    return await callWithTimeout(async (signal) => {
+      const voiceId = process.env.FISH_VOICE_ID;
+      console.log(`[TTS] Fish Audio: voice=${voiceId} text="${text.substring(0, 60)}..."`);
 
-    const response = await fetch('https://api.fish.audio/v1/tts', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.FISH_API_KEY}`,
-        'model': 's2.1-pro-free'
-      },
-      body: JSON.stringify({
-        text,
-        reference_id: voiceId,
-        format: 'wav',
-        sample_rate: 44100,
-        latency: 'normal',
-        temperature: 0.0,
-        top_p: 1.0,
-        normalize: true,
-        prosody: { speed: 1.1, volume: 0, normalize_loudness: true }
-      })
-    });
+      const response = await fetch('https://api.fish.audio/v1/tts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.FISH_API_KEY}`,
+          'model': 's2.1-pro-free'
+        },
+        body: JSON.stringify({
+          text,
+          reference_id: voiceId,
+          format: 'wav',
+          sample_rate: 44100,
+          latency: 'normal',
+          temperature: 0.0,
+          top_p: 1.0,
+          normalize: true,
+          prosody: { speed: 1.1, volume: 0, normalize_loudness: true }
+        }),
+        signal,
+      });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      console.error(`[TTS] Fish Audio error ${response.status}: ${errText}`);
-      throw new Error(`Fish Audio API error: ${response.status}`);
-    }
+      if (!response.ok) {
+        const errText = await response.text();
+        console.error(`[TTS] Fish Audio error ${response.status}: ${errText}`);
+        throw new Error(`Fish Audio API error: ${response.status}`);
+      }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    console.log(`[TTS] Fish Audio OK: ${buffer.length} bytes`);
-    return buffer;
+      const buffer = Buffer.from(await response.arrayBuffer());
+      console.log(`[TTS] Fish Audio OK: ${buffer.length} bytes`);
+      return buffer;
+    }, 10000, 1);
   } catch (error) {
     console.error('[TTS] Error:', error.message);
     return null;

@@ -938,3 +938,29 @@ server.listen(PORT, () => {
   console.log(`StepTalk Voice Agent on port ${PORT}`);
   console.log(`Webhook: https://steptalk.onrender.com/webhook`);
 });
+
+// Graceful shutdown (free, no deps) — let active calls finish on Render SIGTERM
+let isShuttingDown = false;
+function gracefulShutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`${signal} received, draining ${activeCalls.size} active calls...`);
+  server.close(() => {
+    console.log('HTTP server closed, waiting for calls to end...');
+    const start = Date.now();
+    const interval = setInterval(() => {
+      if (activeCalls.size === 0 || Date.now() - start > 15000) {
+        clearInterval(interval);
+        console.log(`Shutdown complete, ${activeCalls.size} calls remaining`);
+        process.exit(0);
+      }
+    }, 1000);
+  });
+  // Force exit after 20s even if calls hang
+  setTimeout(() => {
+    console.log('Force exit after 20s');
+    process.exit(0);
+  }, 20000);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
