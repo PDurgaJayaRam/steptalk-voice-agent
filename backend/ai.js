@@ -293,12 +293,16 @@ const LAUNCH_CRAFT_VOICE_BASE =
   `If they want to speak to a human, say the team will call them back within a few minutes. ` +
   `Never use lists, markdown, or bullet points. This is a voice call, so be conversational.`;
 
-async function generateLLMResponse(userInput, searchContext = null) {
+async function generateLLMResponse(userInput, searchContext = null, proactiveMeeting = false) {
   const kbSnippet = getRelevantKBForVoice(userInput);
   const kbPrefix = kbSnippet ? `Relevant Launch Craft info: ${kbSnippet}\n` : '';
+  const proactiveSuffix = proactiveMeeting
+    ? `\nIMPORTANT: The caller has shown genuine interest. After answering their question briefly, end your response with a question like "Would you like me to connect you with our Launch Craft team to discuss this further?" or "Should I schedule a quick call with our team?"`
+    : '';
+  const wordLimit = proactiveMeeting ? '15 words max' : '10 words max';
   const systemPrompt = searchContext
-    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, 10 words max. ALWAYS end with punctuation. Be natural and warm.`
-    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} Answer in ONE short sentence, 10 words max, ALWAYS end with punctuation (period, exclamation, or question mark).`;
+    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, ${wordLimit}. ALWAYS end with punctuation. Be natural and warm.${proactiveSuffix}`
+    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} Answer in ONE short sentence, ${wordLimit}, ALWAYS end with punctuation (period, exclamation, or question mark).${proactiveSuffix}`;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userInput }
@@ -330,12 +334,16 @@ async function generateLLMResponse(userInput, searchContext = null) {
   }
 }
 
-async function* generateLLMResponseStream(userInput, searchContext = null) {
+async function* generateLLMResponseStream(userInput, searchContext = null, proactiveMeeting = false) {
   const kbSnippet = getRelevantKBForVoice(userInput);
   const kbPrefix = kbSnippet ? `Relevant Launch Craft info: ${kbSnippet}\n` : '';
+  const proactiveSuffix = proactiveMeeting
+    ? `\nIMPORTANT: The caller has shown genuine interest. After answering their question briefly, end your response with a question like "Would you like me to connect you with our Launch Craft team to discuss this further?" or "Should I schedule a quick call with our team?"`
+    : '';
+  const wordLimit = proactiveMeeting ? '15 words max' : '10 words max';
   const systemPrompt = searchContext
-    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, 10 words max, ALWAYS end with punctuation. Be natural and warm. If info is missing, say you could not find live data.`
-    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} Answer in ONE short sentence, 10 words max, ALWAYS end with punctuation (period, exclamation, or question mark).`;
+    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, ${wordLimit}, ALWAYS end with punctuation. Be natural and warm. If info is missing, say you could not find live data.${proactiveSuffix}`
+    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} Answer in ONE short sentence, ${wordLimit}, ALWAYS end with punctuation (period, exclamation, or question mark).${proactiveSuffix}`;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userInput }

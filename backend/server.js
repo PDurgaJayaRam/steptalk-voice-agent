@@ -198,6 +198,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
         retries: 0,
         timestamps: { created: Date.now() },
       },
+      conversationExchanges: 0, // count of client turns; after 2, proactively steer to meeting
     };
     activeCalls.set(callId, callState);
 
@@ -578,6 +579,28 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
       callState.voiceLead = null;
     }
 
+    // Check if client agreed to proactive meeting suggestion (after 2+ exchanges)
+    const isAffirmative = /^(yes|yeah|sure|okay|ok|yep|yup|definitely|absolutely|please|sounds good|let's do it|go ahead|connect me|schedule|book)/i.test(text.trim());
+    if (isAffirmative && (callState.conversationExchanges || 0) >= 2 && !callState.voiceLead) {
+      console.log(`[${callId}] Affirmative response after proactive suggestion, starting lead collection`);
+      if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+      callState.voiceLead = {
+        step: 'ask_name',
+        data: {
+          callerNumber: callState.callerNumber,
+          callerName: callState.callerName,
+          originalMessage: text,
+        },
+      };
+      const askName = `Great! I can schedule a call with the Launch Craft Team for you. May I know your name please?`;
+      const buf = await synthesizeSpeech(askName);
+      if (buf) playAudioToCall(callId, buf);
+      if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
+      callState.isProcessing = false;
+      if (callTimings.has(callId)) { logLatency(callId, callTimings.get(callId)); callTimings.delete(callId); }
+      return;
+    }
+
     // Check if new meeting intent -> start collection instead of normal LLM
     if (isVoiceMeetingIntent(text)) {
       console.log(`[${callId}] Voice meeting intent detected: "${text.slice(0,60)}"`);
@@ -644,7 +667,10 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     callTimings.set(callId, t);
     let sentenceBuffer = '';
 
-    for await (const token of generateLLMResponseStream(text, searchContext)) {
+    // Proactive meeting steering: after 2 exchanges, nudge LLM to suggest scheduling
+    const proactiveMeeting = (callState.conversationExchanges || 0) >= 2 && !callState.voiceLead;
+
+    for await (const token of generateLLMResponseStream(text, searchContext, proactiveMeeting)) {
       if (!callState.pc || callState.pc.connectionState === 'closed') {
         console.log(`[${callId}] LLM streaming interrupted (connection closed)`);
         break;
@@ -733,6 +759,8 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
     const llmMs = Date.now() - llmStart;
     console.log(`[${callId}] LLM stream complete (${llmMs}ms, ${sentenceCount} sentences)`);
+    // Track exchanges for proactive meeting steering
+    callState.conversationExchanges = (callState.conversationExchanges || 0) + 1;
     // If no T8 was logged (e.g., no TTS succeeded), log what we have
     if (callTimings.has(callId)) {
       logLatency(callId, callTimings.get(callId));
