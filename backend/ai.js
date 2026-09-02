@@ -99,7 +99,7 @@ async function transcribeAudio(wavBuffer) {
         return '';
       }
       return data.text || '';
-    }, 8000, 1);
+    }, 6000, 1);
   } catch (error) {
     console.error('STT Error:', error.message);
     return '';
@@ -286,12 +286,13 @@ async function webSearch(query) {
 }
 
 const LAUNCH_CRAFT_VOICE_BASE =
-  `You are Launch Craft Agency's voice bot on a WhatsApp call. Welcome the caller warmly to Launch Craft. ` +
-  `We offer: Web Development, App Development, Brand Marketing (Meta Ads, YouTube, Instagram Handling, Google Ads), AI Automation, and Voice Agents like you. ` +
-  `Be helpful, warm, and concise. Answer in ONE short sentence, 10 words max, ALWAYS end with punctuation. ` +
-  `If they ask to schedule a meeting, say you will connect them to the Launch Craft Team shortly and ask for their name and preferred time. ` +
-  `If they want to speak to a human, say the team will call them back within a few minutes. ` +
-  `Never use lists, markdown, or bullet points. This is a voice call, so be conversational.`;
+  `You are a friendly voice assistant for Launch Craft Agency on a WhatsApp call. ` +
+  `We do: websites, apps, digital marketing (Meta Ads, YouTube, Google Ads), AI automation, voice agents. ` +
+  `Rules: Be natural and warm like a helpful colleague. ONE short sentence, under 15 words. ` +
+  `Always end with punctuation. Never use lists or markdown. ` +
+  `If they want a meeting, ask their name and best time to call. ` +
+  `If they want a human, say the team will call back shortly. ` +
+  `Sound conversational, not robotic.`;
 
 async function generateLLMResponse(userInput, searchContext = null, proactiveMeeting = false) {
   const kbSnippet = getRelevantKBForVoice(userInput);
@@ -299,10 +300,10 @@ async function generateLLMResponse(userInput, searchContext = null, proactiveMee
   const proactiveSuffix = proactiveMeeting
     ? `\nIMPORTANT: The caller has shown genuine interest. After answering their question briefly, end your response with a question like "Would you like me to connect you with our Launch Craft team to discuss this further?" or "Should I schedule a quick call with our team?"`
     : '';
-  const wordLimit = proactiveMeeting ? '15 words max' : '10 words max';
+  const wordLimit = proactiveMeeting ? '15 words max' : '12 words max';
   const systemPrompt = searchContext
-    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, ${wordLimit}. ALWAYS end with punctuation. Be natural and warm.${proactiveSuffix}`
-    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} Answer in ONE short sentence, ${wordLimit}, ALWAYS end with punctuation (period, exclamation, or question mark).${proactiveSuffix}`;
+    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 800)}\nONE sentence, ${wordLimit}. Be natural.${proactiveSuffix}`
+    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} ONE sentence, ${wordLimit}.${proactiveSuffix}`;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userInput }
@@ -313,7 +314,7 @@ async function generateLLMResponse(userInput, searchContext = null, proactiveMee
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${NVIDIA_API_KEY}` },
-        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: false, max_tokens: 100, temperature: 0.5 }),
+        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: false, max_tokens: 60, temperature: 0.3 }),
         signal,
       });
       const j = await response.json();
@@ -340,10 +341,10 @@ async function* generateLLMResponseStream(userInput, searchContext = null, proac
   const proactiveSuffix = proactiveMeeting
     ? `\nIMPORTANT: The caller has shown genuine interest. After answering their question briefly, end your response with a question like "Would you like me to connect you with our Launch Craft team to discuss this further?" or "Should I schedule a quick call with our team?"`
     : '';
-  const wordLimit = proactiveMeeting ? '15 words max' : '10 words max';
+  const wordLimit = proactiveMeeting ? '15 words max' : '12 words max';
   const systemPrompt = searchContext
-    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 1200)}\nAnswer in ONE short sentence, ${wordLimit}, ALWAYS end with punctuation. Be natural and warm. If info is missing, say you could not find live data.${proactiveSuffix}`
-    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} Answer in ONE short sentence, ${wordLimit}, ALWAYS end with punctuation (period, exclamation, or question mark).${proactiveSuffix}`;
+    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 800)}\nONE sentence, ${wordLimit}. Be natural.${proactiveSuffix}`
+    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} ONE sentence, ${wordLimit}.${proactiveSuffix}`;
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userInput }
@@ -354,7 +355,7 @@ async function* generateLLMResponseStream(userInput, searchContext = null, proac
       return await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${NVIDIA_API_KEY}` },
-        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: true, max_tokens: 100, temperature: 0.5 }),
+        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: true, max_tokens: 60, temperature: 0.3 }),
         signal,
       });
     }, 10000, 1);

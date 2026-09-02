@@ -262,8 +262,8 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
     callState.session.timestamps.greeting = Date.now();
     console.log(`[${callId}] Call active! Full-duplex VAD enabled. Session: GREETING`);
 
-    // Proactive Launch Craft welcome greeting - caller hears intro immediately without needing to speak first
-    const greeting = `Hello! Welcome to Launch Craft Agency. We help businesses grow with Web Development, App Development, Brand Marketing including Meta Ads, YouTube, Instagram handling and Google Ads, AI Automation, and Voice Agents like me. How can I help you today?`;
+    // Proactive Launch Craft welcome greeting - natural, identifies as AI, asks open-ended question
+    const greeting = `Hi! I'm your Launch Craft assistant. We build websites, apps, run marketing campaigns, and create AI tools like me. What can we help you with today?`;
     synthesizeSpeech(greeting).then((greetingBuf) => {
       if (greetingBuf && activeCalls.has(callId)) {
         console.log(`[${callId}] Playing welcome greeting (${greetingBuf.length} bytes)`);
@@ -507,7 +507,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         if (data.detectedService) {
           data.service = data.detectedService;
           callState.voiceLead.step = 'ask_time';
-          const askTime = `Thanks ${name}! When should the Launch Craft Team call you? You can say tomorrow morning, tonight, or any time that works for you.`;
+          const askTime = `Thanks ${name}! When works best for a quick call?`;
           const buf = await synthesizeSpeech(askTime);
           if (buf) playAudioToCall(callId, buf);
           // Also send WhatsApp text fallback to caller
@@ -516,7 +516,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
           }
         } else {
           callState.voiceLead.step = 'ask_service';
-          const askSvc = `Thanks ${name}! Which service are you interested in? We offer Web Development, App Development, Brand Marketing, AI Automation, or Voice Agents.`;
+          const askSvc = `Thanks ${name}! Which service are you looking for — web, app, marketing, or AI?`;
           const buf = await synthesizeSpeech(askSvc);
           if (buf) playAudioToCall(callId, buf);
         }
@@ -531,7 +531,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         data.service = svc;
         console.log(`[${callId}] Voice lead: service=${svc}`);
         callState.voiceLead.step = 'ask_time';
-        const askTime = `Great, ${svc} it is! When should the team call you back? You can say tomorrow eleven A M, or this evening.`;
+        const askTime = `Got it, ${svc}! When works best for a quick call?`;
         const buf = await synthesizeSpeech(askTime);
         if (buf) playAudioToCall(callId, buf);
         if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
@@ -567,7 +567,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
           ).catch(()=>{});
         }
         callState.voiceLead = null;
-        const confirm = `Thank you ${data.name}! Your meeting for ${data.service || 'Launch Craft services'} at ${time} is scheduled. The Launch Craft Team will reach out to you within a few minutes. We appreciate your interest!`;
+        const confirm = `Perfect ${data.name}! You're all set for ${time}. Our team will call you shortly. Talk soon!`;
         const buf = await synthesizeSpeech(confirm);
         if (buf) playAudioToCall(callId, buf);
         if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
@@ -592,7 +592,7 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
           originalMessage: text,
         },
       };
-      const askName = `Great! I can schedule a call with the Launch Craft Team for you. May I know your name please?`;
+      const askName = `Great! I can set that up for you. What's your name?`;
       const buf = await synthesizeSpeech(askName);
       if (buf) playAudioToCall(callId, buf);
       if (callState.processingTimeout) { clearTimeout(callState.processingTimeout); callState.processingTimeout = null; }
@@ -629,11 +629,11 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
     const shouldSearch = needsWebSearch(text);
     if (shouldSearch) console.log(`[${callId}] Search triggered for: "${text.slice(0, 60)}"`);
 
-    // Filler: if response takes >700ms (search) or >1100ms (no search), speak a short hold phrase
+    // Filler: if response takes >600ms (search) or >900ms (no search), speak a short hold phrase
     // so caller doesn't think the call died while we fetch search / wait for LLM.
     let fillerPlayed = false;
     let sentenceCount = 0;
-    const fillerDelay = shouldSearch ? 700 : 1100;
+    const fillerDelay = shouldSearch ? 600 : 900;
     fillerTimer = setTimeout(async () => {
       if (fillerPlayed || sentenceCount > 0) return;
       if (!callState.isProcessing || !activeCalls.has(callId)) return;
