@@ -6,25 +6,26 @@ const { Readable } = require('stream');
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const NVIDIA_API_KEY = process.env.NVIDIA_API_KEY;
 
+const GROQ_BASE = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = 'allam-2-7b'; // fastest free: ~219ms TTFT
+const NVIDIA_BASE = 'https://integrate.api.nvidia.com/v1/chat/completions';
+const NVIDIA_MODEL = 'meta/llama-3.2-11b-vision-instruct';
+
 // ---- Speech normalization (free) — makes TTS sound natural for currency/time ----
 function normalizeForSpeech(text) {
   let s = text;
-  // Currency
   s = s.replace(/₹\s*/g, 'rupees ');
   s = s.replace(/\bRs\.?\s*/gi, 'rupees ');
   s = s.replace(/\$/g, ' dollars ');
   s = s.replace(/%/g, ' percent ');
   s = s.replace(/&/g, ' and ');
-  // Time: 10:30 AM -> 10 30 A M  (Fish TTS reads better without colon)
   s = s.replace(/(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)\b/g, (m, h, mm, ap) => `${h} ${mm} ${ap.toUpperCase().split('').join(' ')}`);
   s = s.replace(/\bAM\b/g, 'A M').replace(/\bPM\b/g, 'P M');
-  // Indian number words for rupees context: e.g., "4,50,000 rupees" -> spoken
   s = s.replace(/(\d{1,2},)?\d{1,3},\d{3}\s*rupees/gi, (m) => {
     const num = parseInt(m.replace(/[,\srupees]/gi, ''), 10);
     if (isNaN(num)) return m;
     return `${numberToIndianWords(num)} rupees`;
   });
-  // General large numbers with commas: keep TTS-friendly (remove commas)
   s = s.replace(/(\d),(\d)/g, '$1$2');
   return s;
 }
@@ -60,7 +61,7 @@ function getRelevantKBForVoice(userInput) {
   return relevant.slice(0, 2).map((e) => e.snippet).join('\n');
 }
 
-// ---- Timeout + retry wrapper (free, no deps) — prevents hung external calls from freezing a live call ----
+// ---- Timeout + retry wrapper (free, no deps) ----
 async function callWithTimeout(fn, ms = 5000, retries = 1) {
   for (let i = 0; i <= retries; i++) {
     const controller = new AbortController();
@@ -110,7 +111,7 @@ function stripThinking(text) {
   return text.replace(/<\/?think(ing)?>/g, '').trim();
 }
 
-// ---- Filler phrases: spoken while waiting for slow LLM/search so caller doesn't think call died ----
+// ---- Filler phrases ----
 const FILLER_PHRASES = [
   "Let me check that for you, one moment.",
   "Just a second, looking that up.",
@@ -122,18 +123,11 @@ function getFillerText() {
   return FILLER_PHRASES[Math.floor(Math.random() * FILLER_PHRASES.length)];
 }
 
-// ---- Real-time web search: FREE, no API key required (DDG Instant + Wikipedia) ----
-// Narrowed (Fix 4): only fire for factual queries DDG/Wiki can answer (definitions, general facts).
-// Live queries (price/news/score/weather) are skipped — free tier returns empty/generic and wastes 0.8-1.5s.
-// Those live cases fall through to LLM which says "I don't have live data" per system prompt.
-// Optional upgrade: set TAVILY_API_KEY or BRAVE_API_KEY for true live web search; then broaden this.
+// ---- Real-time web search ----
 function needsWebSearch(text) {
   const q = text.toLowerCase();
-  // Block live queries that free tier can't answer reliably
   const livePattern = /\b(weather|temperature|forecast|humidity|price|stock|crypto|bitcoin|ethereum|share|nifty|sensex|news|score|match|game|live|cricket|today|tomorrow|yesterday|breaking|trending|headlines?|update|current|real.?time)\b/;
   if (livePattern.test(q)) return false;
-
-  // Only factual definitional queries where DDG Instant / Wikipedia shine
   const factualPatterns = [
     /\b(what is|who is|who was|what was|where is|when is|which is)\b/,
     /\b(define|definition|meaning of|explain|history of|capital of|full form|abbreviation)\b/,
@@ -185,10 +179,8 @@ async function searchWikipedia(query) {
     const data = await res.json();
     const hits = data?.query?.search;
     if (!hits || hits.length === 0) return null;
-    // Fetch snippet + fetch first page extract for top hit
     const top = hits[0];
     const snippet = top.snippet ? top.snippet.replace(/<[^>]+>/g, '').replace(/&quot;/g, '"').replace(/&amp;/g, '&') : '';
-    // Try to get extract
     try {
       const exUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&titles=${encodeURIComponent(top.title)}&format=json&origin=*`;
       const exRes = await fetch(exUrl, { headers: { 'User-Agent': 'StepTalk/1.0' } });
@@ -259,7 +251,6 @@ async function searchBrave(query) {
 
 async function webSearch(query) {
   const start = Date.now();
-  // Priority: Tavily / Brave (best live) -> free fallback (DDG + Wikipedia in parallel)
   if (process.env.TAVILY_API_KEY) {
     const r = await searchTavily(query);
     if (r) {
@@ -274,7 +265,6 @@ async function webSearch(query) {
       return r;
     }
   }
-  // Free tier: DDG Instant + Wikipedia in parallel
   const [ddg, wiki] = await Promise.all([searchDDGInstant(query), searchWikipedia(query)]);
   const combined = [ddg, wiki].filter(Boolean).join('\n\n');
   if (combined) {
@@ -294,7 +284,7 @@ const LAUNCH_CRAFT_VOICE_BASE =
   `If they want a human, say the team will call back shortly. ` +
   `Sound conversational, not robotic.`;
 
-async function generateLLMResponse(userInput, searchContext = null, proactiveMeeting = false) {
+function buildMessages(userInput, searchContext, proactiveMeeting) {
   const kbSnippet = getRelevantKBForVoice(userInput);
   const kbPrefix = kbSnippet ? `Relevant Launch Craft info: ${kbSnippet}\n` : '';
   const proactiveSuffix = proactiveMeeting
@@ -304,17 +294,49 @@ async function generateLLMResponse(userInput, searchContext = null, proactiveMee
   const systemPrompt = searchContext
     ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 800)}\nONE sentence, ${wordLimit}. Be natural.${proactiveSuffix}`
     : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} ONE sentence, ${wordLimit}.${proactiveSuffix}`;
-  const messages = [
+  return [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userInput }
   ];
+}
 
+// ---- LLM: Groq primary (219ms TTFT) -> NVIDIA fallback (708ms TTFT) ----
+async function generateLLMResponse(userInput, searchContext = null, proactiveMeeting = false) {
+  const messages = buildMessages(userInput, searchContext, proactiveMeeting);
+
+  // Try Groq first (fastest free)
   try {
     const data = await callWithTimeout(async (signal) => {
-      const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      const response = await fetch(GROQ_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
+        body: JSON.stringify({ model: GROQ_MODEL, messages, stream: false, max_tokens: 60, temperature: 0.3 }),
+        signal,
+      });
+      const j = await response.json();
+      if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+      return j;
+    }, 8000, 1);
+
+    if (data.choices && data.choices.length > 0) {
+      let content = data.choices[0].message.content || '';
+      content = stripThinking(content);
+      if (content.length > 0) {
+        console.log(`[LLM] Groq ${GROQ_MODEL} OK`);
+        return content;
+      }
+    }
+  } catch (error) {
+    console.error(`[LLM] Groq error, falling back to NVIDIA:`, error.message);
+  }
+
+  // Fallback to NVIDIA
+  try {
+    const data = await callWithTimeout(async (signal) => {
+      const response = await fetch(NVIDIA_BASE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${NVIDIA_API_KEY}` },
-        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: false, max_tokens: 60, temperature: 0.3 }),
+        body: JSON.stringify({ model: NVIDIA_MODEL, messages, stream: false, max_tokens: 60, temperature: 0.3 }),
         signal,
       });
       const j = await response.json();
@@ -325,9 +347,11 @@ async function generateLLMResponse(userInput, searchContext = null, proactiveMee
     if (data.choices && data.choices.length > 0) {
       let content = data.choices[0].message.content || '';
       content = stripThinking(content);
-      if (content.length > 0) return content;
+      if (content.length > 0) {
+        console.log(`[LLM] NVIDIA ${NVIDIA_MODEL} OK (fallback)`);
+        return content;
+      }
     }
-
     throw new Error('No response from LLM');
   } catch (error) {
     console.error('LLM Error:', error.message);
@@ -336,26 +360,70 @@ async function generateLLMResponse(userInput, searchContext = null, proactiveMee
 }
 
 async function* generateLLMResponseStream(userInput, searchContext = null, proactiveMeeting = false) {
-  const kbSnippet = getRelevantKBForVoice(userInput);
-  const kbPrefix = kbSnippet ? `Relevant Launch Craft info: ${kbSnippet}\n` : '';
-  const proactiveSuffix = proactiveMeeting
-    ? `\nIMPORTANT: The caller has shown genuine interest. After answering their question briefly, end your response with a question like "Would you like me to connect you with our Launch Craft team to discuss this further?" or "Should I schedule a quick call with our team?"`
-    : '';
-  const wordLimit = proactiveMeeting ? '15 words max' : '12 words max';
-  const systemPrompt = searchContext
-    ? `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE}\nLive info: ${searchContext.slice(0, 800)}\nONE sentence, ${wordLimit}. Be natural.${proactiveSuffix}`
-    : `${kbPrefix}${LAUNCH_CRAFT_VOICE_BASE} ONE sentence, ${wordLimit}.${proactiveSuffix}`;
-  const messages = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: userInput }
-  ];
+  const messages = buildMessages(userInput, searchContext, proactiveMeeting);
 
+  // Try Groq first (fastest free)
   try {
     const response = await callWithTimeout(async (signal) => {
-      return await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
+      return await fetch(GROQ_BASE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` },
+        body: JSON.stringify({ model: GROQ_MODEL, messages, stream: true, max_tokens: 60, temperature: 0.3 }),
+        signal,
+      });
+    }, 10000, 1);
+
+    if (response.ok) {
+      console.log(`[LLM] Streaming from Groq ${GROQ_MODEL}`);
+      const reader = response.body;
+      const decoder = new TextDecoder();
+      let sseBuffer = '';
+      let thinkBuffer = '';
+      let inThink = false;
+
+      for await (const chunk of reader) {
+        sseBuffer += decoder.decode(chunk, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') return;
+            try {
+              const parsed = JSON.parse(data);
+              const token = parsed.choices?.[0]?.delta?.content;
+              if (!token) continue;
+              if (token.includes('<think')) inThink = true;
+              if (inThink) {
+                thinkBuffer += token;
+                if (thinkBuffer.includes('</think>')) {
+                  inThink = false;
+                  thinkBuffer = '';
+                }
+                continue;
+              }
+              yield token;
+            } catch (e) {}
+          }
+        }
+      }
+      return;
+    } else {
+      const errText = await response.text();
+      console.error(`[LLM] Groq error ${response.status}: ${errText}, falling back to NVIDIA`);
+    }
+  } catch (error) {
+    console.error(`[LLM] Groq stream error, falling back to NVIDIA:`, error.message);
+  }
+
+  // Fallback to NVIDIA
+  try {
+    const response = await callWithTimeout(async (signal) => {
+      return await fetch(NVIDIA_BASE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${NVIDIA_API_KEY}` },
-        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: true, max_tokens: 60, temperature: 0.3 }),
+        body: JSON.stringify({ model: NVIDIA_MODEL, messages, stream: true, max_tokens: 60, temperature: 0.3 }),
         signal,
       });
     }, 10000, 1);
@@ -367,6 +435,7 @@ async function* generateLLMResponseStream(userInput, searchContext = null, proac
       return;
     }
 
+    console.log(`[LLM] Streaming from NVIDIA ${NVIDIA_MODEL} (fallback)`);
     const reader = response.body;
     const decoder = new TextDecoder();
     let sseBuffer = '';
@@ -386,9 +455,7 @@ async function* generateLLMResponseStream(userInput, searchContext = null, proac
             const parsed = JSON.parse(data);
             const token = parsed.choices?.[0]?.delta?.content;
             if (!token) continue;
-
             if (token.includes('<think')) inThink = true;
-
             if (inThink) {
               thinkBuffer += token;
               if (thinkBuffer.includes('</think>')) {
@@ -397,7 +464,6 @@ async function* generateLLMResponseStream(userInput, searchContext = null, proac
               }
               continue;
             }
-
             yield token;
           } catch (e) {}
         }
@@ -455,4 +521,3 @@ async function synthesizeSpeech(text) {
 }
 
 module.exports = { generateLLMResponse, generateLLMResponseStream, synthesizeSpeech, transcribeAudio, webSearch, needsWebSearch, getFillerText };
-
