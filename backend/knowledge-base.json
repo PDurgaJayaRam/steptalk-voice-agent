@@ -33,5 +33,30 @@
     "id": "pricing-general",
     "keywords": ["price", "pricing", "cost", "budget", "quote", "how much"],
     "snippet": "Pricing at Launch Craft is custom by scope. We share a clear quote after the discovery call — no hidden fees. Tell us your service and budget and we'll propose a plan."
+  },
+  {
+    "id": "portfolio",
+    "keywords": ["portfolio", "work", "projects", "clients", "examples", "previous"],
+    "snippet": "Launch Craft has delivered projects across industries — from startups to established brands. Our team can share relevant examples on the discovery call."
+  },
+  {
+    "id": "team",
+    "keywords": ["team", "who", "people", "founder", "about you"],
+    "snippet": "Launch Craft is a full-service digital agency with specialists in development, marketing and AI. Our team handles everything from strategy to execution."
+  },
+  {
+    "id": "location",
+    "keywords": ["location", "where", "address", "office", "based"],
+    "snippet": "Launch Craft operates remotely and serves clients globally. We connect via WhatsApp, video calls and email — wherever you are."
+  },
+  {
+    "id": "support",
+    "keywords": ["support", "help", "issue", "problem", "not working"],
+    "snippet": "For support, our team is available via WhatsApp and email. We provide ongoing maintenance and support after launch."
+  },
+  {
+    "id": "meeting",
+    "keywords": ["meeting", "call", "schedule", "book", "appointment", "demo"],
+    "snippet": "We'd love to schedule a quick call to discuss your needs. Just share your name and a convenient time, and our team will reach out."
   }
 ]
