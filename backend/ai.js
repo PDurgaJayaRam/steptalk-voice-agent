@@ -314,7 +314,7 @@ async function generateLLMResponse(userInput, searchContext = null, proactiveMee
       const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${NVIDIA_API_KEY}` },
-        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: false, max_tokens: 60, temperature: 0.3 }),
+        body: JSON.stringify({ model: 'nvidia/nemotron-mini-4b-instruct', messages, stream: false, max_tokens: 60, temperature: 0.3 }),
         signal,
       });
       const j = await response.json();
@@ -355,7 +355,7 @@ async function* generateLLMResponseStream(userInput, searchContext = null, proac
       return await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${NVIDIA_API_KEY}` },
-        body: JSON.stringify({ model: 'meta/llama-3.2-11b-vision-instruct', messages, stream: true, max_tokens: 60, temperature: 0.3 }),
+        body: JSON.stringify({ model: 'nvidia/nemotron-mini-4b-instruct', messages, stream: true, max_tokens: 60, temperature: 0.3 }),
         signal,
       });
     }, 10000, 1);

@@ -199,6 +199,7 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
         timestamps: { created: Date.now() },
       },
       conversationExchanges: 0, // count of client turns; after 2, proactively steer to meeting
+      greetingReady: null, // pre-fetched greeting TTS buffer
     };
     activeCalls.set(callId, callState);
 
@@ -264,11 +265,17 @@ async function handleIncomingCall(callId, session, callerName, callerNumber) {
 
     // Proactive Launch Craft welcome greeting - natural, identifies as AI, asks open-ended question
     const greeting = `Hi! I'm your Launch Craft assistant. We build websites, apps, run marketing campaigns, and create AI tools like me. What can we help you with today?`;
+
+    // Pre-fetch greeting TTS in background (non-blocking) — ready when user first speaks
     synthesizeSpeech(greeting).then((greetingBuf) => {
       if (greetingBuf && activeCalls.has(callId)) {
-        console.log(`[${callId}] Playing welcome greeting (${greetingBuf.length} bytes)`);
-        playAudioToCall(callId, greetingBuf);
-        callState.session.state = 'SPEAKING';
+        callState.greetingReady = greetingBuf;
+        console.log(`[${callId}] Greeting pre-fetched (${greetingBuf.length} bytes)`);
+        // Play greeting immediately if call is still active
+        if (callState.session.state === 'GREETING') {
+          playAudioToCall(callId, greetingBuf);
+          callState.session.state = 'SPEAKING';
+        }
       }
     }).catch((e) => console.error(`[${callId}] Greeting TTS error:`, e.message));
 
@@ -709,20 +716,32 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
             callTimings.set(callId, t7);
           }
           const ttsStart = Date.now();
-          const ttsBuffer = await synthesizeSpeech(sentence);
-          const ttsMs = Date.now() - ttsStart;
 
-          if (ttsBuffer) {
-            console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
-            playAudioToCall(callId, ttsBuffer);
-            // T8 — first audio frame written
-            if (isFirstTts) {
+          // Parallel TTS: fire-and-forget for faster perceived response
+          // First sentence: await for latency measurement
+          // Subsequent sentences: fire TTS, continue LLM streaming
+          if (isFirstTts) {
+            const ttsBuffer = await synthesizeSpeech(sentence);
+            const ttsMs = Date.now() - ttsStart;
+            if (ttsBuffer) {
+              console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
+              playAudioToCall(callId, ttsBuffer);
               const t8 = callTimings.get(callId) || {};
               t8.t8 = Date.now();
               callTimings.set(callId, t8);
               logLatency(callId, t8);
               callTimings.delete(callId);
             }
+          } else {
+            // Fire-and-forget: TTS runs in parallel with LLM streaming
+            const sentNum = sentenceCount;
+            synthesizeSpeech(sentence).then((ttsBuffer) => {
+              const ttsMs = Date.now() - ttsStart;
+              if (ttsBuffer && activeCalls.has(callId)) {
+                console.log(`[${callId}] Sentence ${sentNum} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
+                playAudioToCall(callId, ttsBuffer);
+              }
+            }).catch(e => console.error(`[${callId}] TTS error sentence ${sentNum}:`, e.message));
           }
         }
       }
@@ -740,19 +759,29 @@ async function processAudioForAI(callId, pcmBuffer, sampleRate) {
         callTimings.set(callId, t6);
       }
       const ttsStart = Date.now();
-      const ttsBuffer = await synthesizeSpeech(remaining);
-      const ttsMs = Date.now() - ttsStart;
 
-      if (ttsBuffer) {
-        console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
-        playAudioToCall(callId, ttsBuffer);
-        if (isFirstRemaining) {
+      // Fire-and-forget for remaining sentence too
+      if (isFirstRemaining) {
+        const ttsBuffer = await synthesizeSpeech(remaining);
+        const ttsMs = Date.now() - ttsStart;
+        if (ttsBuffer) {
+          console.log(`[${callId}] Sentence ${sentenceCount} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
+          playAudioToCall(callId, ttsBuffer);
           const t8 = callTimings.get(callId) || {};
           t8.t8 = Date.now();
           callTimings.set(callId, t8);
           logLatency(callId, t8);
           callTimings.delete(callId);
         }
+      } else {
+        const sentNum = sentenceCount;
+        synthesizeSpeech(remaining).then((ttsBuffer) => {
+          const ttsMs = Date.now() - ttsStart;
+          if (ttsBuffer && activeCalls.has(callId)) {
+            console.log(`[${callId}] Sentence ${sentNum} TTS (${ttsMs}ms): ${ttsBuffer.length} bytes`);
+            playAudioToCall(callId, ttsBuffer);
+          }
+        }).catch(e => console.error(`[${callId}] TTS error sentence ${sentNum}:`, e.message));
       }
     }
 
